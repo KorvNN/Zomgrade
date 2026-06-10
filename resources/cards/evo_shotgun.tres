@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UpgradeCard" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/upgrade_card.gd" id="1"]
+[ext_resource type="Resource" path="res://resources/weapons/shotgun.tres" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = "evo_shotgun"
+title = "POMPALI"
+description = "Silahını pompalıya çevir: tek atışta 7 saçma, yakın mesafede yıkıcı.
+
+(Ağır Namlu dalının evrimi)"
+rarity = 2
+max_stacks = 1
+requires = {"heavy_barrel": 1}
+new_weapon = ExtResource("2")

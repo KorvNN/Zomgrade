@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="UpgradeCard" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/upgrade_card.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+id = "heavy_barrel"
+title = "Ağır Namlu"
+description = "Hasar +%50, atış hızı -%20.
+
+Aldığında POMPALI evrim kartı havuza girer."
+rarity = 1
+max_stacks = 2
+weapon_mul = {"damage": 1.5, "fire_rate": 0.8}

@@ -1,0 +1,24 @@
+[gd_resource type="Resource" script_class="WeaponData" load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapon_data.gd" id="1"]
+[ext_resource type="PackedScene" path="res://assets/weapons/Rifle.fbx" id="2"]
+[ext_resource type="AudioStream" path="res://assets/audio/weapons/rifle_fire.wav" id="3"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Otomatik Tüfek"
+damage = 7.0
+fire_rate = 9.0
+mag_size = 30
+reserve_ammo = 210
+auto = true
+reload_time = 1.6
+headshot_mult = 2.5
+pellets = 1
+spread_deg = 1.5
+model_scene = ExtResource("2")
+view_scale = 0.055
+view_rot_deg = Vector3(0, -90, 0)
+view_pos = Vector3(0.1, -0.14, -0.12)
+fire_sound = ExtResource("3")
+fire_volume_db = -15.0

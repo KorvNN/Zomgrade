@@ -1,0 +1,16 @@
+[gd_resource type="Resource" script_class="UpgradeCard" load_steps=3 format=3]
+
+[ext_resource type="Script" path="res://scripts/upgrade_card.gd" id="1"]
+[ext_resource type="Resource" path="res://resources/weapons/rifle.tres" id="2"]
+
+[resource]
+script = ExtResource("1")
+id = "evo_rifle"
+title = "OTOMATİK TÜFEK"
+description = "Silahını tam otomatik tüfeğe çevir: basılı tut, 30'luk şarjörle yağmur yağdır.
+
+(Hızlı Tetik dalının evrimi)"
+rarity = 2
+max_stacks = 1
+requires = {"firerate_up": 2}
+new_weapon = ExtResource("2")

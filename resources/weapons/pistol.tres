@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="WeaponData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/weapon_data.gd" id="1"]
+
+[resource]
+script = ExtResource("1")
+display_name = "Tabanca"
+damage = 10.0
+fire_rate = 6.0
+mag_size = 14
+reserve_ammo = 140
+auto = false
+reload_time = 1.2
+headshot_mult = 2.5
