@@ -154,7 +154,9 @@ func _spawn_impact(point: Vector3, normal: Vector3) -> void:
 	get_tree().current_scene.add_child(fx)
 	fx.global_position = point
 	if normal.length() > 0.01:
-		fx.look_at(point + normal, Vector3.UP)
+		# normal tam dikeyse UP ile çakışıp uyarı verir; o durumda başka eksen kullan
+		var up := Vector3.UP if absf(normal.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
+		fx.look_at(point + normal, up)
 
 
 func reload() -> void:

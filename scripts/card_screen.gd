@@ -30,6 +30,7 @@ func _ready() -> void:
 	_load_pool()
 	_build_ui()
 	Game.leveled_up.connect(_on_leveled_up)
+	Game.bonus_draw.connect(_on_leveled_up.bind(0))
 
 
 func _load_pool() -> void:
@@ -50,7 +51,7 @@ func _show_next() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	$LevelUpSfx.play()
 
-	_title.text = "SEVİYE %d — BİR KART SEÇ" % Game.level
+	_title.text = "BİR KART SEÇ"
 	for child in _card_row.get_children():
 		child.queue_free()
 

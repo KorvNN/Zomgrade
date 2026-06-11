@@ -65,6 +65,12 @@ shape = SubResource("capsule")
 unique_name_in_owner = true
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 
+[node name="Lantern" type="OmniLight3D" parent="Camera"]
+light_color = Color(1, 0.92, 0.75, 1)
+light_energy = 1.1
+omni_range = 9.0
+omni_attenuation = 1.4
+
 [node name="Ray" type="RayCast3D" parent="Camera"]
 unique_name_in_owner = true
 target_position = Vector3(0, 0, -100)
@@ -228,6 +234,20 @@ offset_bottom = 44.0
 theme_override_fonts/font = ExtResource("7")
 theme_override_font_sizes/font_size = 24
 text = "KILL: 0"
+horizontal_alignment = 2
+
+[node name="GoldLabel" type="Label" parent="HUD"]
+anchors_preset = 1
+anchor_left = 1.0
+anchor_right = 1.0
+offset_left = -220.0
+offset_top = 46.0
+offset_right = -24.0
+offset_bottom = 78.0
+theme_override_colors/font_color = Color(0.95, 0.8, 0.3, 1)
+theme_override_fonts/font = ExtResource("7")
+theme_override_font_sizes/font_size = 24
+text = "0 ⬤"
 horizontal_alignment = 2
 
 [node name="DeathLabel" type="Label" parent="HUD"]

@@ -7,6 +7,7 @@ extends CanvasLayer
 @onready var xp_bar: ProgressBar = $XPBar
 @onready var level_label: Label = $LevelLabel
 @onready var kills_label: Label = $KillsLabel
+@onready var gold_label: Label = $GoldLabel
 @onready var hitmarker: TextureRect = $Hitmarker
 @onready var vignette: ColorRect = $HurtVignette
 @onready var death_label: Label = $DeathLabel
@@ -26,6 +27,8 @@ func _ready() -> void:
 	Game.xp_changed.connect(_on_xp_changed)
 	Game.leveled_up.connect(_on_leveled_up)
 	Game.kills_changed.connect(_on_kills_changed)
+	Game.gold_changed.connect(_on_gold_changed)
+	gold_label.text = "%d ⬤" % Game.gold
 
 	_on_ammo_changed(weapon.current_ammo, weapon.reserve)
 	_on_health_changed(player.health, player.max_health)
@@ -64,6 +67,13 @@ func _on_kills_changed(kills: int) -> void:
 	kills_label.text = "KILL: %d" % kills
 
 
+func _on_gold_changed(gold: int) -> void:
+	gold_label.text = "%d ⬤" % gold
+	gold_label.scale = Vector2(1.2, 1.2)
+	var tween := create_tween()
+	tween.tween_property(gold_label, "scale", Vector2.ONE, 0.15)
+
+
 func _on_hit_confirmed(headshot: bool) -> void:
 	hitmarker.modulate = Color(1, 0.2, 0.15, 1) if headshot else Color(1, 1, 1, 1)
 	var pop := 1.7 if headshot else 1.25
@@ -74,11 +84,20 @@ func _on_hit_confirmed(headshot: bool) -> void:
 
 
 func _on_hurt() -> void:
+	$HurtSfx.play()
+	if player.dead:
+		return  # ölümde vignette kalıcı, soldurma
 	vignette.modulate.a = 0.55
 	var tween := create_tween()
 	tween.tween_property(vignette, "modulate:a", 0.0, 0.4)
-	$HurtSfx.play()
 
 
 func _on_died() -> void:
 	death_label.show()
+	# nişangah ve oyun göstergeleri ölüyken anlamsız
+	$Crosshair.hide()
+	hitmarker.hide()
+	ammo_label.hide()
+	$WeaponLabel.hide()
+	# kalıcı kırmızı karartma
+	vignette.modulate.a = 0.45

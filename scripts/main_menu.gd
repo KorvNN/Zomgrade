@@ -1,7 +1,7 @@
 extends Control
 ## Ana menü: oyunu başlat / çık.
 
-const LEVEL_SCENE := "res://scenes/main/test_room.tscn"
+const LEVEL_SCENE := "res://scenes/main/dungeon.tscn"
 
 
 func _ready() -> void:
