@@ -2,7 +2,7 @@ class_name MenuUI
 extends RefCounted
 ## Menü butonu/başlık üretimi için ortak yardımcılar (ana menü + duraklatma).
 
-const FONT := preload("res://assets/fonts/Kenney Future Narrow.ttf")
+const FONT := preload("res://assets/fonts/ui_font.tres")  # Kenney + Türkçe (İŞĞ) fallback
 
 
 static func make_title(text: String, size := 84, color := Color(0.5, 0.85, 0.3)) -> Label:
@@ -40,5 +40,8 @@ static func make_button(text: String, on_press: Callable) -> Button:
 	btn.add_theme_color_override("font_hover_color", Color(0.08, 0.1, 0.08))
 	btn.add_theme_color_override("font_pressed_color", Color(0.08, 0.1, 0.08))
 
-	btn.pressed.connect(on_press)
+	# tıklama sesi (kalıcı autoload'dan çalar → sahne değişse de kesilmez), sonra eylem
+	btn.pressed.connect(func() -> void:
+		Music.click()
+		on_press.call())
 	return btn

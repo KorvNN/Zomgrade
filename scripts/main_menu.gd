@@ -1,55 +1,365 @@
 extends Control
-## Ana menü: oyunu başlat / çık.
+## Ana menü: oyunu başlat / çık. Arka planda ateş ışığında dinlenen yalnız bir
+## figürün olduğu, sisli, atmosferik 3B zindan dioraması döner.
 
 const LEVEL_SCENE := "res://scenes/main/dungeon.tscn"
+const SettingsMenuScript := preload("res://scripts/settings_menu.gd")
+const KAYKIT := "res://addons/kaykit_dungeon_remastered/assets/gltf/"
+const ZOMBIE_MODEL := "res://assets/characters/Zombie_Male.gltf"
+const WEAPONS := "res://assets/weapons/"
+
+var _cam: Camera3D
+var _cam_base := Vector3(1.25, 1.45, -1.6)   ## ateş aydınlık alanına yukarıdan-yakın bakış
+var _cam_target := Vector3(-0.9, 0.75, -5.0)  ## kamera sola nişanlı → özne kadrajda sağda kalır
+var _fire_light: OmniLight3D
+var _fire_base := 2.1
+var _fig: Node3D       ## ateşin başında dinlenen figür (nefes alıp veriyormuş gibi)
+var _fig_rot := 0.0
+var _t := 0.0
 
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	Game.reset()
+	Music.play_menu()
 	_build()
+
+
+func _process(delta: float) -> void:
+	_t += delta
+	if _fire_light:
+		# meşale titremesi: hızlı küçük + yavaş büyük dalgalanma
+		var flick := sin(_t * 17.0) * 0.25 + sin(_t * 6.3) * 0.4 + randf() * 0.2
+		_fire_light.light_energy = _fire_base + flick
+	if _fig:
+		# yorgun nefes alıp verme: çok hafif öne-arkaya salınım
+		_fig.rotation_degrees.x = _fig_rot + sin(_t * 1.1) * 1.2
+	if _cam:
+		# çerçeveyi koruyup hafifçe salla → sahne canlı, kadraj sabit
+		var off := Vector3(sin(_t * 0.16) * 0.3, sin(_t * 0.24) * 0.08, 0.0)
+		_cam.look_at_from_position(_cam_base + off, _cam_target, Vector3.UP)
 
 
 func _build() -> void:
 	set_anchors_preset(Control.PRESET_FULL_RECT)
 
-	var bg := ColorRect.new()
-	bg.color = Color(0.06, 0.07, 0.09)
-	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	add_child(bg)
+	_build_background()
 
-	var center := CenterContainer.new()
-	center.set_anchors_preset(Control.PRESET_FULL_RECT)
-	add_child(center)
+	# sahneyi hafifçe karart → menü okunaklı kalsın, sahne görünür kalsın
+	var scrim := ColorRect.new()
+	scrim.color = Color(0.02, 0.03, 0.05, 0.26)
+	scrim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	scrim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(scrim)
 
-	var vbox := VBoxContainer.new()
-	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	vbox.add_theme_constant_override("separation", 18)
-	center.add_child(vbox)
+	# --- başlık: en üstte, ortada ---
+	var top := VBoxContainer.new()
+	top.set_anchors_preset(Control.PRESET_TOP_WIDE)
+	top.alignment = BoxContainer.ALIGNMENT_CENTER
+	top.offset_top = 48
+	top.add_theme_constant_override("separation", 6)
+	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(top)
+	top.add_child(_pop(MenuUI.make_title("ZOMGRADE", 140)))
+	var subtitle := _pop(MenuUI.make_title("ZOMBİ DALGALARINDAN SAĞ ÇIK", 26, Color(0.78, 0.80, 0.82)))
+	subtitle.add_theme_constant_override("outline_size", 6)
+	top.add_child(subtitle)
 
-	vbox.add_child(MenuUI.make_title("ZOMGRADE"))
+	# --- menü: ortada, dikeyde merkezin biraz altında ---
+	var menu := VBoxContainer.new()
+	menu.set_anchors_preset(Control.PRESET_CENTER)
+	menu.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	menu.grow_vertical = Control.GROW_DIRECTION_BOTH
+	menu.position += Vector2(0, 70)  # başlığın altında, sahneyle dengeli
+	menu.alignment = BoxContainer.ALIGNMENT_CENTER
+	menu.add_theme_constant_override("separation", 16)
+	add_child(menu)
+	menu.add_child(MenuUI.make_button("BAŞLA", _on_start))
+	menu.add_child(MenuUI.make_button("AYARLAR", _on_settings))
+	menu.add_child(MenuUI.make_button("ÇIKIŞ", _on_quit))
 
-	var subtitle := MenuUI.make_title("zombi dalgalarından sağ çık", 22, Color(0.6, 0.62, 0.65))
-	vbox.add_child(subtitle)
+	# --- alt ipucu: en altta, ortada ---
+	var hint := _pop(MenuUI.make_title(
+			"WASD HAREKET     •     FARE NİŞAN     •     SOL TIK ATEŞ     •     R DOLDUR     •     ESC DURAKLAT",
+			16, Color(0.62, 0.64, 0.67)))
+	hint.set_anchors_preset(Control.PRESET_BOTTOM_WIDE)
+	hint.offset_top = -58
+	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	add_child(hint)
 
-	var spacer := Control.new()
-	spacer.custom_minimum_size = Vector2(0, 30)
-	vbox.add_child(spacer)
 
-	vbox.add_child(MenuUI.make_button("BAŞLA", _on_start))
-	vbox.add_child(MenuUI.make_button("ÇIKIŞ", _on_quit))
+## metni 3B sahnenin üzerinde okunaklı kılmak için koyu dış hat ekler
+func _pop(label: Label) -> Label:
+	label.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
+	label.add_theme_constant_override("outline_size", 8)
+	return label
 
-	var hint := MenuUI.make_title("WASD hareket • Fare nişan • Sol tık ateş • R doldur • ESC duraklat",
-			16, Color(0.45, 0.47, 0.5))
-	var hint_spacer := Control.new()
-	hint_spacer.custom_minimum_size = Vector2(0, 40)
-	vbox.add_child(hint_spacer)
-	vbox.add_child(hint)
+
+# ---------- 3B arka plan dioraması ----------
+
+func _build_background() -> void:
+	var world := Node3D.new()
+	world.name = "Background3D"
+	add_child(world)
+	move_child(world, 0)  # her şeyin arkasında kalsın
+
+	# ortam: koyu, sıcak ışıklı, sisli
+	var we := WorldEnvironment.new()
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.015, 0.018, 0.025)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.26, 0.22, 0.20)
+	env.ambient_light_energy = 0.42
+	env.fog_enabled = true
+	env.fog_light_color = Color(0.06, 0.05, 0.07)
+	env.fog_light_energy = 0.6
+	env.fog_density = 0.05
+	env.fog_sky_affect = 0.0
+	env.glow_enabled = true
+	env.glow_intensity = 0.28
+	env.glow_bloom = 0.0
+	env.glow_hdr_threshold = 1.3
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	we.environment = env
+	world.add_child(we)
+
+	_cam = Camera3D.new()
+	_cam.fov = 56.0
+	world.add_child(_cam)
+	_cam.look_at_from_position(_cam_base, _cam_target, Vector3.UP)
+	_cam.make_current()
+
+	# hafif soğuk dolgu ışığı (şekil okunsun)
+	var key := DirectionalLight3D.new()
+	key.rotation_degrees = Vector3(-50, 35, 0)
+	key.light_color = Color(0.45, 0.5, 0.62)
+	key.light_energy = 0.32
+	world.add_child(key)
+
+	# zemin (düz kareler — yön bağımsız)
+	for ix in range(-2, 3):
+		for iz in range(-3, 2):
+			_place(world, "floor_tile_large.gltf.glb", Vector3(ix * 4.0, 0, iz * 4.0))
+
+	# arka duvar — zombinin yaslandığı duvar (sis içinde sönükleşir)
+	for ix in range(-2, 3):
+		_place(world, "wall.gltf.glb", Vector3(ix * 4.0, 0, -6.0), 0.0)
+
+	# sütunlar — derinlik için, simetrik olduğundan yön sorunu yok
+	_place(world, "column.gltf.glb", Vector3(-5.5, 0, -2.0))
+	_place(world, "column.gltf.glb", Vector3(5.5, 0, -2.0))
+
+	# --- duvara yaslanmış, yorgun, ateşe bakan oturan zombi ---
+	# SitDown pozu "sandalye yüksekliğinde" asılı kalıyor → zombiyi indirip
+	# altına taş oturak koyuyoruz: ateş başında taşta oturma görüntüsü.
+	var fig_pos := Vector3(0.85, -0.25, -5.45)
+	var seat := MeshInstance3D.new()
+	var seat_mesh := BoxMesh.new()
+	seat_mesh.size = Vector3(0.62, 0.36, 0.55)
+	seat.mesh = seat_mesh
+	var seat_mat := StandardMaterial3D.new()
+	seat_mat.albedo_color = Color(0.2, 0.2, 0.22)
+	seat_mat.roughness = 0.95
+	seat.material_override = seat_mat
+	seat.position = Vector3(fig_pos.x, 0.18, fig_pos.z - 0.05)
+	seat.rotation_degrees.y = 14.0
+	world.add_child(seat)
+	_fig = (load(ZOMBIE_MODEL) as PackedScene).instantiate()
+	_fig.scale = Vector3.ONE * 0.75
+	_fig.position = fig_pos
+	# GLTF modelin doğal yüzü +Z (zombie.gd'de mount içinde 180° çevrilmesinden
+	# kanıtlı). Ateş +Z tarafında → ~0° ateşe bakar; 12° hafif 3/4 verir.
+	_fig.rotation_degrees.y = 12.0
+	_fig_rot = -6.0                   # geriye, duvara yaslanmış
+	world.add_child(_fig)
+	var fig_anim: AnimationPlayer = _fig.find_child("AnimationPlayer", true, false)
+	if fig_anim and fig_anim.has_animation("SitDown"):
+		var sit := fig_anim.get_animation("SitDown")
+		sit.loop_mode = Animation.LOOP_NONE
+		fig_anim.play("SitDown")
+		fig_anim.seek(sit.length, true)  # oturmuş son karede dondur
+		fig_anim.pause()
+
+	# --- kamp ateşi: oturan figürün önünde ---
+	var fire_pos := Vector3(fig_pos.x - 0.3, 0, fig_pos.z + 1.4)
+	_build_campfire(world, fire_pos)
+	# çevre proplar — duvara girmesinler diye öne/yana çekildi
+	_place(world, "barrel_large.gltf.glb", Vector3(fig_pos.x + 2.4, 0, fig_pos.z + 1.0))
+	_place(world, "crates_stacked.gltf.glb", Vector3(fig_pos.x - 2.5, 0, fig_pos.z + 1.2))
+
+	# --- dinlenen savaşçının silahları ---
+	# Tüfek + pompalı: zombinin iki yanında, namlu yukarı, hafif geriye yatık →
+	# duvara dayalı. (Uzun eksen lokal +Y; X'te negatif eğim tepeyi -Z duvara yaslar.)
+	_place_weapon(world, "Rifle.fbx", Vector3(fig_pos.x + 1.7, 0, fig_pos.z + 0.1), Vector3(-16, -25, 0), 0.12)
+	_place_weapon(world, "Shotgun.fbx", Vector3(fig_pos.x + 0.95, 0, fig_pos.z + 0.12), Vector3(-14, -20, 0), 0.12)
+	# Tabanca: zombinin hemen önünde yerde yatık
+	_place_weapon(world, "Pistol.fbx", Vector3(fig_pos.x + 0.45, 0, fig_pos.z + 0.75), Vector3(0, 50, 0), 0.07)
+
+
+func _build_campfire(world: Node3D, pos: Vector3) -> void:
+	# taş halkası — pürüzlü, düzensiz taşlar (küp gibi durmasın)
+	var stone := StandardMaterial3D.new()
+	stone.albedo_color = Color(0.17, 0.17, 0.19)
+	stone.roughness = 0.95
+	for i in 10:
+		var ang := TAU * i / 10.0 + randf_range(-0.12, 0.12)
+		var s := MeshInstance3D.new()
+		var bm := SphereMesh.new()
+		bm.radius = 0.14
+		bm.height = 0.24
+		bm.radial_segments = 5  # az yüzey → kaba taş hissi
+		bm.rings = 3
+		s.mesh = bm
+		s.material_override = stone
+		s.scale = Vector3(randf_range(0.8, 1.3), randf_range(0.6, 0.9), randf_range(0.8, 1.3))
+		s.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+		s.position = pos + Vector3(cos(ang) * 0.52, 0.06, sin(ang) * 0.52)
+		world.add_child(s)
+
+	# çapraz yatık kütükler
+	var wood := StandardMaterial3D.new()
+	wood.albedo_color = Color(0.24, 0.15, 0.08)
+	wood.roughness = 0.95
+	for i in 3:
+		var logm := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = 0.05
+		cyl.bottom_radius = 0.06
+		cyl.height = 0.8
+		logm.mesh = cyl
+		logm.material_override = wood
+		logm.position = pos + Vector3(0, 0.1, 0)
+		logm.rotation = Vector3(deg_to_rad(90), PI * i / 3.0, 0)
+		world.add_child(logm)
+
+	# alev parçacıkları
+	var flame := GPUParticles3D.new()
+	flame.position = pos + Vector3(0, 0.12, 0)
+	flame.amount = 18
+	flame.lifetime = 0.5
+	flame.preprocess = 1.0
+	var fm := ParticleProcessMaterial.new()
+	fm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	fm.emission_box_extents = Vector3(0.14, 0.03, 0.14)
+	fm.direction = Vector3(0, 1, 0)
+	fm.spread = 8.0
+	fm.initial_velocity_min = 0.5
+	fm.initial_velocity_max = 1.0
+	fm.gravity = Vector3(0, 0.5, 0)
+	fm.scale_min = 0.5
+	fm.scale_max = 0.85
+	var fgrad := Gradient.new()
+	fgrad.set_color(0, Color(1.0, 0.78, 0.32))
+	fgrad.set_color(1, Color(0.7, 0.1, 0.02, 0.0))
+	fgrad.add_point(0.45, Color(1.0, 0.45, 0.1, 0.85))
+	var framp := GradientTexture1D.new()
+	framp.gradient = fgrad
+	fm.color_ramp = framp
+	flame.process_material = fm
+	var fquad := QuadMesh.new()
+	fquad.size = Vector2(0.2, 0.2)
+	var fmat := StandardMaterial3D.new()
+	fmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	fmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	fmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	fmat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	fmat.vertex_color_use_as_albedo = true
+	fmat.albedo_color = Color(1, 1, 1)
+	fquad.material = fmat
+	flame.draw_pass_1 = fquad
+	world.add_child(flame)
+
+	# titreyen sıcak ışık + yükselen közler
+	_fire_light = OmniLight3D.new()
+	_fire_light.light_color = Color(1.0, 0.62, 0.28)
+	_fire_light.light_energy = _fire_base
+	_fire_light.omni_range = 9.5
+	_fire_light.omni_attenuation = 1.3
+	_fire_light.shadow_enabled = true
+	_fire_light.position = pos + Vector3(0, 0.6, 0)
+	world.add_child(_fire_light)
+	_build_embers(world, pos + Vector3(0, 0.4, 0))
+
+
+func _build_embers(world: Node3D, pos: Vector3) -> void:
+	var p := GPUParticles3D.new()
+	p.position = pos
+	p.amount = 36
+	p.lifetime = 2.6
+	p.preprocess = 1.5
+
+	var mat := ParticleProcessMaterial.new()
+	mat.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	mat.emission_sphere_radius = 0.35
+	mat.direction = Vector3(0, 1, 0)
+	mat.spread = 25.0
+	mat.initial_velocity_min = 0.4
+	mat.initial_velocity_max = 1.1
+	mat.gravity = Vector3(0, 0.6, 0)  # közler yükselsin
+	mat.scale_min = 0.4
+	mat.scale_max = 1.0
+	mat.color = Color(1.0, 0.55, 0.2)
+	p.process_material = mat
+
+	var quad := QuadMesh.new()
+	quad.size = Vector2(0.05, 0.05)
+	var qm := StandardMaterial3D.new()
+	qm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	qm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	qm.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	qm.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	qm.albedo_color = Color(1.0, 0.6, 0.25)
+	qm.emission_enabled = true
+	qm.emission = Color(1.0, 0.5, 0.15)
+	qm.emission_energy_multiplier = 3.0
+	quad.material = qm
+	p.draw_pass_1 = quad
+	world.add_child(p)
+
+
+func _place(world: Node3D, file: String, pos: Vector3, yaw_deg := 0.0) -> void:
+	var scene: PackedScene = load(KAYKIT + file)
+	if scene == null:
+		return
+	var node: Node3D = scene.instantiate()
+	node.position = pos
+	node.rotation_degrees.y = yaw_deg
+	world.add_child(node)
+
+
+func _place_weapon(world: Node3D, file: String, pos: Vector3, rot_deg: Vector3, scl := 0.05) -> void:
+	var scene: PackedScene = load(WEAPONS + file)
+	if scene == null:
+		return
+	var node: Node3D = scene.instantiate()
+	node.scale = Vector3.ONE * scl
+	node.position = pos
+	node.rotation_degrees = rot_deg
+	# parlak çelik → ateş ışığını yakalasın, sönük durmasın
+	var gunmetal := StandardMaterial3D.new()
+	gunmetal.albedo_color = Color(0.52, 0.55, 0.60)
+	gunmetal.metallic = 0.9
+	gunmetal.metallic_specular = 0.65
+	gunmetal.roughness = 0.28
+	gunmetal.emission_enabled = true
+	gunmetal.emission = Color(0.16, 0.15, 0.14)
+	gunmetal.emission_energy_multiplier = 0.5
+	world.add_child(node)
+	for mesh: MeshInstance3D in node.find_children("*", "MeshInstance3D", true, false):
+		mesh.material_override = gunmetal
+		# gölge yayma kapalı → ateş ışığını boğup sahneyi karartmasınlar
+		mesh.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func _on_start() -> void:
 	Game.reset()
 	get_tree().change_scene_to_file(LEVEL_SCENE)
+
+
+func _on_settings() -> void:
+	var settings: CanvasLayer = SettingsMenuScript.new()
+	add_child(settings)
 
 
 func _on_quit() -> void:

@@ -7,6 +7,8 @@ extends Node3D
 signal ammo_changed(current: int, reserve: int)
 signal hit_confirmed(headshot: bool)
 signal weapon_changed(display_name: String)
+signal reload_started(duration: float)
+signal reload_finished
 
 const IMPACT_SCENE := preload("res://scenes/fx/impact.tscn")
 const AMMO_PER_KILL := 3  ## her öldürmede yedeğe dönen mermi
@@ -34,6 +36,9 @@ func _ready() -> void:
 	_base_z = position.z
 	ray.add_exception(owner)
 	_grab_model_anim()
+	var gm := get_node_or_null("GunModel")
+	if gm:
+		_apply_gunmetal(gm)  # başlangıç silahı da metal görünsün (beyaz kalmasın)
 	_recompute(false)
 	Game.kills_changed.connect(_on_kill)
 
@@ -48,8 +53,11 @@ func _process(delta: float) -> void:
 	if wants_fire and _cooldown == 0.0 and not _reloading:
 		if current_ammo > 0:
 			_fire()
-		else:
-			reload()
+		elif reserve > 0:
+			reload()  # şarjör boş ama yedek var → otomatik doldur
+		elif Input.is_action_just_pressed("shoot"):
+			$DryFireSfx.play()  # tamamen boş → kuru tetik tıkı
+			_cooldown = 0.25
 
 	if Input.is_action_just_pressed("reload"):
 		reload()
@@ -163,8 +171,12 @@ func reload() -> void:
 	if _reloading or current_ammo == data.mag_size or reserve <= 0:
 		return
 	_reloading = true
+	if data.reload_sound:
+		$ReloadSfx.stream = data.reload_sound
+		$ReloadSfx.volume_db = -6.0
 	$ReloadSfx.play()
 	_play_gun_anim("Reload", data.reload_time)
+	reload_started.emit(data.reload_time)
 	await get_tree().create_timer(data.reload_time).timeout
 	if not is_instance_valid(self):
 		return
@@ -172,6 +184,7 @@ func reload() -> void:
 	current_ammo += taken
 	reserve -= taken
 	_reloading = false
+	reload_finished.emit()
 	ammo_changed.emit(current_ammo, reserve)
 
 
@@ -203,10 +216,12 @@ func _grab_model_anim() -> void:
 
 
 func _apply_gunmetal(root: Node) -> void:
+	# koyu, mat silah metali — parlayıp beyaza patlamaz, net "silah" okunur
 	var gunmetal := StandardMaterial3D.new()
-	gunmetal.albedo_color = Color(0.16, 0.17, 0.19)
-	gunmetal.metallic = 0.55
-	gunmetal.roughness = 0.45
+	gunmetal.albedo_color = Color(0.11, 0.12, 0.14)
+	gunmetal.metallic = 0.45
+	gunmetal.metallic_specular = 0.4
+	gunmetal.roughness = 0.55
 	for mesh: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
 		mesh.material_override = gunmetal
 
@@ -215,7 +230,10 @@ func _play_gun_anim(action: String, fit_time := 0.0) -> void:
 	if _gun_anim == null:
 		return
 	for anim_name in _gun_anim.get_animation_list():
-		if anim_name.ends_with("|" + action) or anim_name == action:
+		# "Armature|FireWBullet" gibi adlar → "|" sonrası parça aksiyonla başlasın yeter
+		# (Fire → Fire/FireWBullet/FireWOBullet hepsini yakalar)
+		var part: String = anim_name.substr(anim_name.rfind("|") + 1)
+		if part.begins_with(action):
 			_gun_anim.stop()
 			if fit_time > 0.0:
 				var alen := _gun_anim.get_animation(anim_name).length

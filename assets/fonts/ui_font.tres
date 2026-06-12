@@ -1,0 +1,8 @@
+[gd_resource type="FontVariation" load_steps=2 format=3 uid="uid://b8zomgradeuifont"]
+
+; Tüm arayüz fontu: Audiowide (OFL) — Kenney Future'a en yakın tekno/oyun havası,
+; tam Türkçe destekli (İŞĞÇÖÜ + küçükleri). Kenney'de İ/Ş/Ğ glifleri yoktu.
+[ext_resource type="FontFile" path="res://assets/fonts/Audiowide.ttf" id="1_base"]
+
+[resource]
+base_font = ExtResource("1_base")

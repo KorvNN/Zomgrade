@@ -23,6 +23,7 @@ extends Resource
 @export var view_pos := Vector3(0, -0.3, -0.08) ## modelin konumu (kameraya göre)
 @export var fire_sound: AudioStream
 @export var fire_volume_db := -14.0
+@export var reload_sound: AudioStream
 
 
 func view_transform() -> Transform3D:

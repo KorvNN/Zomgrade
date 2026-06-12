@@ -13,7 +13,7 @@ const RARITY_WEIGHTS := [60.0, 26.0, 10.0, 4.0]
 var pool: Array[UpgradeCard] = []
 var _queue := 0
 var _showing := false
-var _font: FontFile
+var _font: Font
 
 @onready var player: Node = get_parent()
 @onready var weapon: Node = get_node("%Gun")
@@ -26,7 +26,7 @@ var _card_row: HBoxContainer
 func _ready() -> void:
 	layer = 10
 	process_mode = Node.PROCESS_MODE_ALWAYS
-	_font = load("res://assets/fonts/Kenney Future Narrow.ttf")
+	_font = load("res://assets/fonts/ui_font.tres")
 	_load_pool()
 	_build_ui()
 	Game.leveled_up.connect(_on_leveled_up)
@@ -56,14 +56,30 @@ func _show_next() -> void:
 		child.queue_free()
 
 	var choices := _draw_cards(3)
+	var cards: Array[Button] = []
 	for i in choices.size():
 		var card_ui := _make_card(choices[i])
+		card_ui.disabled = true  # açılış animasyonu bitene dek tıklanamaz
 		_card_row.add_child(card_ui)
+		card_ui.pivot_offset = card_ui.custom_minimum_size / 2.0
 		card_ui.modulate.a = 0.0
+		card_ui.scale = Vector2(0.6, 0.6)
 		var tween := card_ui.create_tween()
-		tween.tween_interval(0.07 * i)
-		tween.tween_property(card_ui, "modulate:a", 1.0, 0.18)
+		tween.tween_interval(0.09 * i)
+		tween.set_parallel()
+		tween.tween_property(card_ui, "modulate:a", 1.0, 0.22)
+		tween.tween_property(card_ui, "scale", Vector2.ONE, 0.32) \
+				.set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+		cards.append(card_ui)
 	_root.show()
+
+	# atış yaparken kazara seçimi önle: kartlar oturana kadar kilitli
+	await get_tree().create_timer(0.55).timeout
+	if not _showing:
+		return  # bu arada kapandıysa dokunma
+	for c in cards:
+		if is_instance_valid(c):
+			c.disabled = false
 
 
 func _draw_cards(count: int) -> Array[UpgradeCard]:
@@ -153,6 +169,7 @@ func _make_card(card: UpgradeCard) -> Button:
 	btn.add_theme_stylebox_override("normal", style)
 	btn.add_theme_stylebox_override("hover", hover)
 	btn.add_theme_stylebox_override("pressed", hover)
+	btn.add_theme_stylebox_override("disabled", style)  # kilitliyken sönük görünmesin
 
 	var vbox := VBoxContainer.new()
 	vbox.set_anchors_preset(Control.PRESET_FULL_RECT)

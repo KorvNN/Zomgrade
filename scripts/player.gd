@@ -11,9 +11,20 @@ signal died
 @export var mouse_sensitivity := 0.002
 @export var max_health := 100.0
 
+const FOOTSTEPS := [
+	preload("res://assets/audio/impact/footstep_concrete_000.ogg"),
+	preload("res://assets/audio/impact/footstep_concrete_001.ogg"),
+	preload("res://assets/audio/impact/footstep_concrete_002.ogg"),
+	preload("res://assets/audio/impact/footstep_concrete_003.ogg"),
+	preload("res://assets/audio/impact/footstep_concrete_004.ogg"),
+]
+
 var health: float
 var lifesteal := 0.0  ## kartlarla artar; verilen hasarın bu oranı kadar iyileşir
 var dead := false
+
+var _step_player: AudioStreamPlayer
+var _step_dist := 0.0  ## son adımdan beri yürünen mesafe
 
 @onready var camera: Camera3D = %Camera
 
@@ -25,6 +36,10 @@ var _shake := 0.0                  ## anlık sarsıntı şiddeti
 func _ready() -> void:
 	health = max_health
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	add_to_group("player")
+	_step_player = AudioStreamPlayer.new()
+	_step_player.volume_db = -15.0
+	add_child(_step_player)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -74,6 +89,22 @@ func _physics_process(delta: float) -> void:
 		velocity.z = move_toward(velocity.z, 0.0, speed)
 
 	move_and_slide()
+	_update_footsteps(delta)
+
+
+func _update_footsteps(delta: float) -> void:
+	if not is_on_floor():
+		return
+	var hspeed := Vector2(velocity.x, velocity.z).length()
+	if hspeed < 1.0:
+		_step_dist = 1.8  # durunca: bir sonraki adım hemen çalsın
+		return
+	_step_dist += hspeed * delta
+	if _step_dist >= 2.4:
+		_step_dist = 0.0
+		_step_player.stream = FOOTSTEPS[randi() % FOOTSTEPS.size()]
+		_step_player.pitch_scale = randf_range(0.88, 1.12)
+		_step_player.play()
 
 
 func take_damage(amount: float) -> void:

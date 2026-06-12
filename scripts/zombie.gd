@@ -12,6 +12,21 @@ const MODELS := [
 const MODEL_SCALE := 0.6
 const HEAD_HEIGHT := 1.35  ## bu yüksekliğin üstüne isabet = kafa vuruşu
 
+const SND_GROAN := [
+	preload("res://assets/audio/zombie/zombie_groan_0.wav"),
+	preload("res://assets/audio/zombie/zombie_groan_1.wav"),
+	preload("res://assets/audio/zombie/zombie_groan_2.wav"),
+]
+const SND_ATTACK := [
+	preload("res://assets/audio/zombie/zombie_attack_0.wav"),
+	preload("res://assets/audio/zombie/zombie_attack_1.wav"),
+]
+const SND_HURT := [
+	preload("res://assets/audio/zombie/zombie_hurt_0.wav"),
+	preload("res://assets/audio/zombie/zombie_hurt_1.wav"),
+]
+const SND_DEATH := preload("res://assets/audio/zombie/zombie_death.wav")
+
 @export var max_health := 30.0
 @export var speed := 3.0
 @export var attack_damage := 10.0
@@ -28,6 +43,9 @@ var anim: AnimationPlayer
 var player: Node3D
 var _attack_timer := 0.0
 var _hit_flash_timer := 0.0
+var _voice: AudioStreamPlayer3D
+var _groan_timer := 0.0
+var _vocal := false  ## sadece bazı zombiler ara ara homurdanır
 
 
 func _ready() -> void:
@@ -43,6 +61,15 @@ func _ready() -> void:
 	anim = model.find_child("AnimationPlayer", true, false)
 
 	_apply_zombie_skin(model)
+
+	_voice = AudioStreamPlayer3D.new()
+	_voice.unit_size = 3.5
+	_voice.max_distance = 24.0
+	_voice.volume_db = -8.0
+	_voice.position.y = 1.2
+	add_child(_voice)
+	_vocal = randf() < 0.45
+	_groan_timer = randf_range(4.0, 12.0)
 
 	# topraktan yükselme efekti
 	mount.position.y = -1.6
@@ -75,6 +102,12 @@ func _physics_process(delta: float) -> void:
 		velocity += get_gravity() * delta
 
 	_attack_timer = maxf(_attack_timer - delta, 0.0)
+
+	if _vocal and (state == State.CHASE or state == State.ATTACK):
+		_groan_timer -= delta
+		if _groan_timer <= 0.0:
+			_groan_timer = randf_range(9.0, 20.0)
+			_say(SND_GROAN, 0.82, 1.18)
 
 	if state == State.SPAWNING:
 		velocity.x = 0.0
@@ -113,6 +146,8 @@ func _attack() -> void:
 	state = State.ATTACK
 	_attack_timer = attack_cooldown
 	anim.play("Punch")
+	if randf() < 0.5:  # her vuruşta değil — sürekli ses sinir bozucu oluyordu
+		_say(SND_ATTACK, 0.95, 1.12, true)
 	await get_tree().create_timer(0.45).timeout
 	if state == State.DEAD or player == null:
 		return
@@ -136,6 +171,16 @@ func take_damage(amount: float, _headshot := false) -> void:
 	elif state != State.ATTACK:
 		# kısa irkilme animasyonu
 		anim.play("RecieveHit")
+		if randf() < 0.5:
+			_say(SND_HURT, 0.95, 1.15, true)
+
+
+func _say(streams, lo: float, hi: float, force := false) -> void:
+	if _voice == null or (_voice.playing and not force):
+		return
+	_voice.stream = streams[randi() % streams.size()] if streams is Array else streams
+	_voice.pitch_scale = randf_range(lo, hi)
+	_voice.play()
 
 
 func _die() -> void:
@@ -144,6 +189,7 @@ func _die() -> void:
 	$Collision.set_deferred("disabled", true)
 	anim.speed_scale = 1.0
 	anim.play("Death")
+	_say(SND_DEATH, 0.85, 1.05, true)
 	Game.add_kill(xp_value)
 	died.emit()
 	await get_tree().create_timer(2.0).timeout

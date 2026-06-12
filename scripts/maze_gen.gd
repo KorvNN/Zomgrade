@@ -1,13 +1,16 @@
 class_name MazeGen
 extends RefCounted
-## Grid hücre labirenti üretici (recursive backtracker + braid).
-## v_walls[x][y]: (x-1,y) ile (x,y) hücreleri arasındaki dikey duvar (x: 0..w)
-## h_walls[x][y]: (x,y-1) ile (x,y) hücreleri arasındaki yatay duvar (y: 0..h)
+## Oda + koridor zindan üreticisi ("Rooms and Mazes").
+## Önce odalar yerleştirilir, boş alana koridor labirenti örülür, sonra bölgeler
+## kapı bağlantılarıyla birleştirilir ve fazla koridor uçları budanır.
+## v_walls[x][y]: (x-1,y)-(x,y) arası dikey duvar (x: 0..w)
+## h_walls[x][y]: (x,y-1)-(x,y) arası yatay duvar (y: 0..h)
 
 const DIRS := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+const ROOM_TYPES := ["depo", "sapel", "yemekhane", "hazine", "yatakhane"]
 
 
-static func generate(w: int, h: int, rng_seed: int, braid := 0.25) -> Dictionary:
+static func generate(w: int, h: int, rng_seed: int, braid := 0.12) -> Dictionary:
 	var rng := RandomNumberGenerator.new()
 	rng.seed = rng_seed
 
@@ -18,76 +21,117 @@ static func generate(w: int, h: int, rng_seed: int, braid := 0.25) -> Dictionary
 	for x in w:
 		h_walls.append(_filled(h + 1))
 
-	# --- recursive backtracker ---
-	var visited := { Vector2i.ZERO: true }
-	var stack: Array[Vector2i] = [Vector2i.ZERO]
-	while not stack.is_empty():
-		var c: Vector2i = stack.back()
-		var options: Array[Vector2i] = []
-		for d: Vector2i in DIRS:
-			var n: Vector2i = c + d
-			if n.x >= 0 and n.x < w and n.y >= 0 and n.y < h and not visited.has(n):
-				options.append(n)
-		if options.is_empty():
-			stack.pop_back()
-			continue
-		var nxt: Vector2i = options[rng.randi() % options.size()]
-		_open_between(v_walls, h_walls, c, nxt)
-		visited[nxt] = true
-		stack.append(nxt)
+	var region := {}          # Vector2i -> bölge id
+	var region_of := []       # union-find üst dizisi
+	var next_region := 0
 
-	# --- braid: çıkmaz sokakların bir kısmını açıp döngüler yarat ---
-	for x in w:
-		for y in h:
-			var c := Vector2i(x, y)
-			if _wall_count(v_walls, h_walls, c, w, h) >= 3 and rng.randf() < braid:
-				var closed: Array[Vector2i] = []
-				for d: Vector2i in DIRS:
-					var n: Vector2i = c + d
-					if n.x >= 0 and n.x < w and n.y >= 0 and n.y < h \
-							and has_wall_between(v_walls, h_walls, c, n):
-						closed.append(n)
-				if not closed.is_empty():
-					_open_between(v_walls, h_walls, c, closed[rng.randi() % closed.size()])
-
-	# --- odalar: labirentin içine açık alanlar oy ---
+	# --- 1) odalar: çok ve geniş, başlangıç hücresini boş bırak ---
 	var rooms: Array[Dictionary] = []
 	var room_cells := {}
-	var room_types := ["depo", "sapel", "yemekhane", "hazine", "yatakhane"]
-	var attempts := 0
-	while rooms.size() < 4 and attempts < 30:
-		attempts += 1
-		var rw := rng.randi_range(2, 3)
+	var max_rooms: int = clampi(int(w * h / 9.0), 5, 11)
+	var attempts := w * h
+	while rooms.size() < max_rooms and attempts > 0:
+		attempts -= 1
+		var rw := rng.randi_range(2, 4)
 		var rh := rng.randi_range(2, 3)
 		var rx := rng.randi_range(0, w - rw)
 		var ry := rng.randi_range(0, h - rh)
 		var rect := Rect2i(rx, ry, rw, rh)
-		if rect.has_point(Vector2i.ZERO):
-			continue
+		if rect.grow(1).has_point(Vector2i.ZERO):
+			continue  # spawn hücresi koridor kalsın
 		var clash := false
-		for r: Dictionary in rooms:
-			if (r.rect as Rect2i).grow(1).intersects(rect):
-				clash = true
+		for cy in range(ry - 1, ry + rh + 1):
+			for cx in range(rx - 1, rx + rw + 1):
+				if room_cells.has(Vector2i(cx, cy)):
+					clash = true
+					break
+			if clash:
 				break
 		if clash:
 			continue
-		# oda içindeki tüm duvarları kaldır
-		for x2 in range(rx, rx + rw):
-			for y2 in range(ry, ry + rh):
-				room_cells[Vector2i(x2, y2)] = true
-				if x2 + 1 < rx + rw:
-					v_walls[x2 + 1][y2] = false
-				if y2 + 1 < ry + rh:
-					h_walls[x2][y2 + 1] = false
-		rooms.append({
-			"rect": rect,
-			"type": room_types[rng.randi() % room_types.size()],
-		})
+		var rid := next_region
+		next_region += 1
+		region_of.append(rid)
+		for cx in range(rx, rx + rw):
+			for cy in range(ry, ry + rh):
+				var c := Vector2i(cx, cy)
+				region[c] = rid
+				room_cells[c] = true
+				if cx + 1 < rx + rw:
+					v_walls[cx + 1][cy] = false
+				if cy + 1 < ry + rh:
+					h_walls[cx][cy + 1] = false
+		rooms.append({"rect": rect, "type": ROOM_TYPES[rng.randi() % ROOM_TYPES.size()]})
 
-	# --- BFS: başlangıçtan uzaklıklar, en uzak hücre = çıkış ---
+	# --- 2) boş hücrelere koridor labirenti ör (her bağımsız parça = bölge) ---
+	for sx in w:
+		for sy in h:
+			var start := Vector2i(sx, sy)
+			if region.has(start):
+				continue
+			var rid := next_region
+			next_region += 1
+			region_of.append(rid)
+			var stack: Array[Vector2i] = [start]
+			region[start] = rid
+			while not stack.is_empty():
+				var c: Vector2i = stack.back()
+				var options: Array[Vector2i] = []
+				for d: Vector2i in DIRS:
+					var n: Vector2i = c + d
+					if n.x >= 0 and n.x < w and n.y >= 0 and n.y < h \
+							and not region.has(n) and not room_cells.has(n):
+						options.append(n)
+				if options.is_empty():
+					stack.pop_back()
+					continue
+				var nxt: Vector2i = options[rng.randi() % options.size()]
+				_open_between(v_walls, h_walls, c, nxt)
+				region[nxt] = rid
+				stack.append(nxt)
+
+	# --- 3) bölgeleri kapı bağlantılarıyla birleştir (union-find) ---
+	var connectors: Array = []  # [cell_a, cell_b]
+	for x in w:
+		for y in h:
+			var c := Vector2i(x, y)
+			if not region.has(c):
+				continue
+			for d: Vector2i in [Vector2i(1, 0), Vector2i(0, 1)]:
+				var n: Vector2i = c + d
+				if n.x < w and n.y < h and region.has(n) \
+						and region[c] != region[n] and has_wall_between(v_walls, h_walls, c, n):
+					connectors.append([c, n])
+	_shuffle(connectors, rng)
+	for pair: Array in connectors:
+		var ra: int = _find(region_of, region[pair[0]])
+		var rb: int = _find(region_of, region[pair[1]])
+		if ra != rb:
+			_open_between(v_walls, h_walls, pair[0], pair[1])
+			region_of[ra] = rb  # birleştir
+		elif rng.randf() < braid:
+			_open_between(v_walls, h_walls, pair[0], pair[1])  # nadir döngü
+
+	# --- 4) koridor çıkmazlarını buda (oda dışı, tek açıklıklı uçları kapat) ---
+	for _pass in 2:
+		for x in w:
+			for y in h:
+				var c := Vector2i(x, y)
+				if c == Vector2i.ZERO or room_cells.has(c):
+					continue
+				if _wall_count(v_walls, h_walls, c, w, h) == 3 and rng.randf() < 0.6:
+					for d: Vector2i in DIRS:
+						var n: Vector2i = c + d
+						if n.x >= 0 and n.x < w and n.y >= 0 and n.y < h \
+								and not has_wall_between(v_walls, h_walls, c, n):
+							_close_between(v_walls, h_walls, c, n)
+							break
+
+	# --- 5) BFS: ulaşılabilirlik + en uzak hücre = çıkış ---
 	var dist := { Vector2i.ZERO: 0 }
 	var queue: Array[Vector2i] = [Vector2i.ZERO]
 	var far := Vector2i.ZERO
+	var far_corridor := Vector2i(-1, -1)  # oda olmayan en uzak hücre (çıkış için tercih)
 	while not queue.is_empty():
 		var c2: Vector2i = queue.pop_front()
 		for d: Vector2i in DIRS:
@@ -97,15 +141,20 @@ static func generate(w: int, h: int, rng_seed: int, braid := 0.25) -> Dictionary
 				dist[n] = dist[c2] + 1
 				if dist[n] > dist[far]:
 					far = n
+				if not room_cells.has(n) and (far_corridor.x < 0 or dist[n] > dist[far_corridor]):
+					far_corridor = n
 				queue.append(n)
+	# çıkış: mümkünse koridor hücresi (halkanın altı temiz kalsın)
+	if far_corridor.x >= 0:
+		far = far_corridor
 
-	# --- kalan çıkmaz sokaklar (sandık/ganimet adayları) ---
+	# --- 6) ulaşılabilir koridor çıkmazları (sandık adayları) ---
 	var dead_ends: Array[Vector2i] = []
 	for x in w:
 		for y in h:
 			var c3 := Vector2i(x, y)
 			if c3 != Vector2i.ZERO and c3 != far and not room_cells.has(c3) \
-					and _wall_count(v_walls, h_walls, c3, w, h) >= 3:
+					and dist.has(c3) and _wall_count(v_walls, h_walls, c3, w, h) >= 3:
 				dead_ends.append(c3)
 
 	return {
@@ -115,6 +164,25 @@ static func generate(w: int, h: int, rng_seed: int, braid := 0.25) -> Dictionary
 		"rooms": rooms, "room_cells": room_cells,
 	}
 
+
+# ---------- union-find ----------
+
+static func _find(parent: Array, i: int) -> int:
+	while parent[i] != i:
+		parent[i] = parent[parent[i]]
+		i = parent[i]
+	return i
+
+
+static func _shuffle(arr: Array, rng: RandomNumberGenerator) -> void:
+	for i in range(arr.size() - 1, 0, -1):
+		var j := rng.randi() % (i + 1)
+		var tmp = arr[i]
+		arr[i] = arr[j]
+		arr[j] = tmp
+
+
+# ---------- duvar yardımcıları ----------
 
 static func has_wall_between(v_walls: Array, h_walls: Array, a: Vector2i, b: Vector2i) -> bool:
 	if b.x == a.x + 1:
@@ -135,6 +203,17 @@ static func _open_between(v_walls: Array, h_walls: Array, a: Vector2i, b: Vector
 		h_walls[a.x][a.y + 1] = false
 	else:
 		h_walls[a.x][a.y] = false
+
+
+static func _close_between(v_walls: Array, h_walls: Array, a: Vector2i, b: Vector2i) -> void:
+	if b.x == a.x + 1:
+		v_walls[a.x + 1][a.y] = true
+	elif b.x == a.x - 1:
+		v_walls[a.x][a.y] = true
+	elif b.y == a.y + 1:
+		h_walls[a.x][a.y + 1] = true
+	else:
+		h_walls[a.x][a.y] = true
 
 
 static func _wall_count(v_walls: Array, h_walls: Array, c: Vector2i, w: int, h: int) -> int:

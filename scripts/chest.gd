@@ -3,6 +3,7 @@ extends StaticBody3D
 
 const CHEST_MODEL := "res://addons/kaykit_dungeon_remastered/assets/gltf/chest.glb"
 const GOLD_MODEL := "res://addons/kaykit_dungeon_remastered/assets/gltf/chest_gold.glb"
+const OPEN_SND := preload("res://assets/audio/sfx/chest_open.wav")
 
 var cost := 30
 var opened := false
@@ -81,6 +82,15 @@ func _try_open() -> void:
 	if not Game.spend_gold(cost):
 		return
 	opened = true
+
+	var snd := AudioStreamPlayer3D.new()
+	snd.stream = OPEN_SND
+	snd.unit_size = 3.0
+	snd.volume_db = -4.0
+	snd.position.y = 0.6
+	add_child(snd)
+	snd.play()
+	snd.finished.connect(snd.queue_free)
 
 	# altın sandığa dönüş + parlama
 	_model.queue_free()

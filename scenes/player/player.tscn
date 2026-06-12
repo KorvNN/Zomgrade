@@ -1,4 +1,4 @@
-[gd_scene load_steps=20 format=3]
+[gd_scene load_steps=21 format=3]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/weapon.gd" id="2"]
@@ -16,6 +16,7 @@
 [ext_resource type="AudioStream" path="res://assets/audio/interface/confirmation_002.ogg" id="14"]
 [ext_resource type="Texture2D" path="res://assets/particles/muzzle_01.png" id="15"]
 [ext_resource type="AudioStream" path="res://assets/audio/impact/impactMetal_light_000.ogg" id="16"]
+[ext_resource type="AudioStream" path="res://assets/audio/weapons/dryfire.wav" id="17"]
 
 [sub_resource type="StandardMaterial3D" id="flash_mat"]
 transparency = 1
@@ -111,6 +112,10 @@ volume_db = -8.0
 [node name="ReloadSfx" type="AudioStreamPlayer" parent="Camera/Gun"]
 stream = ExtResource("16")
 volume_db = -4.0
+
+[node name="DryFireSfx" type="AudioStreamPlayer" parent="Camera/Gun"]
+stream = ExtResource("17")
+volume_db = -8.0
 
 [node name="HUD" type="CanvasLayer" parent="."]
 script = ExtResource("3")

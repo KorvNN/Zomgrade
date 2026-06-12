@@ -26,6 +26,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func _pause() -> void:
 	get_tree().paused = true
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+	Music.play_menu()
 	_root.show()
 
 
@@ -33,6 +34,7 @@ func _resume() -> void:
 	_root.hide()
 	get_tree().paused = false
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	Music.play_game()
 
 
 func _build() -> void:
