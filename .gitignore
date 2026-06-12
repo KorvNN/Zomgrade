@@ -1,4 +1,5 @@
 .godot/
+.import/
 _downloads/
 *.bat
-.import/
+*.import
