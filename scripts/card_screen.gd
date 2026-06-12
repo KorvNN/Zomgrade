@@ -9,9 +9,11 @@ const RARITY_COLORS: Array[Color] = [
 ]
 const RARITY_NAMES := ["SIRADAN", "NADİR", "EPİK", "EFSANEVİ"]
 const RARITY_WEIGHTS := [60.0, 26.0, 10.0, 4.0]
+const BOOSTED_WEIGHTS := [4.0, 28.0, 44.0, 24.0]  ## bahçe boss sandığı: sıradan neredeyse çıkmaz
+const LEGEND_WEIGHTS := [0.0, 8.0, 42.0, 50.0]  ## şato boss sandığı: epik/efsanevi ağırlıklı
 
 var pool: Array[UpgradeCard] = []
-var _queue := 0
+var _queue: Array[int] = []  ## bekleyen çekilişlerin rarity boost değerleri
 var _showing := false
 var _font: Font
 
@@ -30,7 +32,7 @@ func _ready() -> void:
 	_load_pool()
 	_build_ui()
 	Game.leveled_up.connect(_on_leveled_up)
-	Game.bonus_draw.connect(_on_leveled_up.bind(0))
+	Game.bonus_draw.connect(_on_bonus_draw)
 
 
 func _load_pool() -> void:
@@ -40,7 +42,13 @@ func _load_pool() -> void:
 
 
 func _on_leveled_up(_new_level: int) -> void:
-	_queue += 1
+	_queue.append(0)
+	if not _showing:
+		_show_next()
+
+
+func _on_bonus_draw(rarity_boost: int) -> void:
+	_queue.append(rarity_boost)
 	if not _showing:
 		_show_next()
 
@@ -51,11 +59,12 @@ func _show_next() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
 	$LevelUpSfx.play()
 
-	_title.text = "BİR KART SEÇ"
+	var boost: int = _queue[0]
+	_title.text = "BOSS GANİMETİ — BİR KART SEÇ" if boost > 0 else "BİR KART SEÇ"
 	for child in _card_row.get_children():
 		child.queue_free()
 
-	var choices := _draw_cards(3)
+	var choices := _draw_cards(3, boost)
 	var cards: Array[Button] = []
 	for i in choices.size():
 		var card_ui := _make_card(choices[i])
@@ -82,16 +91,21 @@ func _show_next() -> void:
 			c.disabled = false
 
 
-func _draw_cards(count: int) -> Array[UpgradeCard]:
+func _draw_cards(count: int, rarity_boost := 0) -> Array[UpgradeCard]:
+	var weights := RARITY_WEIGHTS
+	if rarity_boost >= 3:
+		weights = LEGEND_WEIGHTS
+	elif rarity_boost > 0:
+		weights = BOOSTED_WEIGHTS
 	var eligible := pool.filter(func(c: UpgradeCard) -> bool: return c.is_available())
 	var result: Array[UpgradeCard] = []
 	while result.size() < count and not eligible.is_empty():
 		var total := 0.0
 		for c: UpgradeCard in eligible:
-			total += RARITY_WEIGHTS[c.rarity]
+			total += weights[c.rarity]
 		var roll := randf() * total
 		for c: UpgradeCard in eligible:
-			roll -= RARITY_WEIGHTS[c.rarity]
+			roll -= weights[c.rarity]
 			if roll <= 0.0:
 				result.append(c)
 				eligible.erase(c)
@@ -110,8 +124,8 @@ func _pick(card: UpgradeCard) -> void:
 	player.refresh_stats()
 	$PickSfx.play()
 
-	_queue -= 1
-	if _queue > 0:
+	_queue.pop_front()
+	if not _queue.is_empty():
 		_show_next()
 	else:
 		_root.hide()

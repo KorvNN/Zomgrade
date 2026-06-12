@@ -12,6 +12,15 @@ const MODELS := [
 const MODEL_SCALE := 0.6
 const HEAD_HEIGHT := 1.35  ## bu yüksekliğin üstüne isabet = kafa vuruşu
 
+## mantıksal anim adı -> aday listesi: zombi modeli ilkini, KayKit iskeletleri ikincisini bulur
+const ANIM_FALLBACKS := {
+	"Run": ["Run", "Running_A"],
+	"Punch": ["Punch", "Unarmed_Melee_Attack_Punch_A"],
+	"Death": ["Death", "Death_A"],
+	"RecieveHit": ["RecieveHit", "Hit_A"],
+	"StandUp": ["StandUp", "Spawn_Ground"],
+}
+
 const SND_GROAN := [
 	preload("res://assets/audio/zombie/zombie_groan_0.wav"),
 	preload("res://assets/audio/zombie/zombie_groan_1.wav"),
@@ -26,6 +35,7 @@ const SND_HURT := [
 	preload("res://assets/audio/zombie/zombie_hurt_1.wav"),
 ]
 const SND_DEATH := preload("res://assets/audio/zombie/zombie_death.wav")
+const PICKUP := preload("res://scripts/pickup.gd")
 
 @export var max_health := 30.0
 @export var speed := 3.0
@@ -33,6 +43,13 @@ const SND_DEATH := preload("res://assets/audio/zombie/zombie_death.wav")
 @export var attack_range := 1.8
 @export var attack_cooldown := 1.3
 @export var xp_value := 20
+@export var gold_value := 6
+@export var model_path := ""  ## boşsa rastgele zombi; iskelet vb. için doldur
+@export var model_scale := 0.6  ## boss için büyütülür
+@export var base_scale := 0.6  ## modelin "normal insan boyu" ölçeği (zombi 0.6, iskelet 0.85)
+@export var is_boss := false
+
+signal health_changed(health: float, max_health: float)
 
 @onready var agent: NavigationAgent3D = $Agent
 @onready var mount: Node3D = $ModelMount
@@ -40,6 +57,7 @@ const SND_DEATH := preload("res://assets/audio/zombie/zombie_death.wav")
 var state := State.SPAWNING
 var health: float
 var anim: AnimationPlayer
+var _anim := {}  ## mantıksal ad -> bu modeldeki gerçek anim adı
 var player: Node3D
 var _attack_timer := 0.0
 var _hit_flash_timer := 0.0
@@ -53,14 +71,30 @@ func _ready() -> void:
 	speed *= randf_range(0.85, 1.25)
 	player = get_tree().get_first_node_in_group("player")
 
-	# rastgele erkek/dişi model, yerin altından doğsun
-	var model: Node3D = (load(MODELS[randi() % MODELS.size()]) as PackedScene).instantiate()
-	model.scale = Vector3.ONE * MODEL_SCALE
+	# model: belirtilmişse o (iskelet vb.), yoksa rastgele erkek/dişi zombi
+	var path: String = model_path if model_path != "" else MODELS[randi() % MODELS.size()]
+	var model: Node3D = (load(path) as PackedScene).instantiate()
+	model.scale = Vector3.ONE * model_scale
 	model.rotation_degrees.y = 180.0
 	mount.add_child(model)
 	anim = model.find_child("AnimationPlayer", true, false)
+	for logical: String in ANIM_FALLBACKS:
+		for cand: String in ANIM_FALLBACKS[logical]:
+			if anim.has_animation(cand):
+				_anim[logical] = cand
+				break
 
-	_apply_zombie_skin(model)
+	# boss: collision kapsülü model oranında büyüsün
+	if model_scale > base_scale + 0.01:
+		var k := model_scale / base_scale
+		var cap: CapsuleShape3D = $Collision.shape.duplicate()
+		cap.radius *= k
+		cap.height *= k
+		$Collision.shape = cap
+		$Collision.position.y *= k
+
+	if model_path == "":
+		_apply_zombie_skin(model)  # yeşil tonlama sadece zombilere
 
 	_voice = AudioStreamPlayer3D.new()
 	_voice.unit_size = 3.5
@@ -71,15 +105,15 @@ func _ready() -> void:
 	_vocal = randf() < 0.45
 	_groan_timer = randf_range(4.0, 12.0)
 
-	# topraktan yükselme efekti
-	mount.position.y = -1.6
-	anim.play("StandUp")
+	# topraktan yükselme efekti (boss daha derinden çıkar — modeli gömülü kalmasın)
+	mount.position.y = -1.6 * (model_scale / base_scale)
+	anim.play(_anim["StandUp"])
 	var rise := create_tween()
 	rise.tween_property(mount, "position:y", 0.0, 0.7).set_trans(Tween.TRANS_CUBIC)
 	await rise.finished
 	if state != State.DEAD:
 		state = State.CHASE
-		anim.play("Run")
+		anim.play(_anim["Run"])
 		anim.speed_scale = randf_range(0.9, 1.2)
 
 
@@ -136,8 +170,8 @@ func _physics_process(delta: float) -> void:
 		dir = dir.normalized()
 		velocity.x = dir.x * speed
 		velocity.z = dir.z * speed
-		if anim.current_animation != "Run":
-			anim.play("Run")
+		if anim.current_animation != _anim["Run"]:
+			anim.play(_anim["Run"])
 
 	move_and_slide()
 
@@ -145,7 +179,7 @@ func _physics_process(delta: float) -> void:
 func _attack() -> void:
 	state = State.ATTACK
 	_attack_timer = attack_cooldown
-	anim.play("Punch")
+	anim.play(_anim["Punch"])
 	if randf() < 0.5:  # her vuruşta değil — sürekli ses sinir bozucu oluyordu
 		_say(SND_ATTACK, 0.95, 1.12, true)
 	await get_tree().create_timer(0.45).timeout
@@ -159,18 +193,19 @@ func _attack() -> void:
 
 
 func is_headshot(point: Vector3) -> bool:
-	return point.y - global_position.y > HEAD_HEIGHT
+	return point.y - global_position.y > HEAD_HEIGHT * (model_scale / base_scale)
 
 
 func take_damage(amount: float, _headshot := false) -> void:
 	if state == State.DEAD:
 		return
 	health -= amount
+	health_changed.emit(maxf(health, 0.0), max_health)
 	if health <= 0.0:
 		_die()
 	elif state != State.ATTACK:
 		# kısa irkilme animasyonu
-		anim.play("RecieveHit")
+		anim.play(_anim["RecieveHit"])
 		if randf() < 0.5:
 			_say(SND_HURT, 0.95, 1.15, true)
 
@@ -188,11 +223,26 @@ func _die() -> void:
 	velocity = Vector3.ZERO
 	$Collision.set_deferred("disabled", true)
 	anim.speed_scale = 1.0
-	anim.play("Death")
+	anim.play(_anim["Death"])
 	_say(SND_DEATH, 0.85, 1.05, true)
-	Game.add_kill(xp_value)
+	Game.add_kill()
+	_drop_loot()
 	died.emit()
 	await get_tree().create_timer(2.0).timeout
 	var tween := create_tween()
 	tween.tween_property(mount, "position:y", -1.5, 0.8)
 	tween.tween_callback(queue_free)
+
+
+func _drop_loot() -> void:
+	## XP küresi + altın yere saçılır; oyuncu yürüyerek/mıknatısla toplar
+	var origin := global_position + Vector3(0, 1.0, 0)
+	var holder := get_parent()
+	PICKUP.spawn(holder, origin, "xp", xp_value)
+	var gold_left := gold_value
+	var coins := 1 + randi() % 2 if not is_boss else 6
+	for i in coins:
+		var amount := gold_left / (coins - i)
+		gold_left -= amount
+		if amount > 0:
+			PICKUP.spawn(holder, origin, "gold", amount)

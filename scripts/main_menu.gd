@@ -9,8 +9,8 @@ const ZOMBIE_MODEL := "res://assets/characters/Zombie_Male.gltf"
 const WEAPONS := "res://assets/weapons/"
 
 var _cam: Camera3D
-var _cam_base := Vector3(1.25, 1.45, -1.6)   ## ateş aydınlık alanına yukarıdan-yakın bakış
-var _cam_target := Vector3(-0.9, 0.75, -5.0)  ## kamera sola nişanlı → özne kadrajda sağda kalır
+var _cam_base := Vector3(0.0, 1.7, 0.9)      ## geriden, hafif yukarıdan genel plan
+var _cam_target := Vector3(0.0, 0.8, -5.2)   ## duvara dik bakış → dünya-x = ekran-x
 var _fire_light: OmniLight3D
 var _fire_base := 2.1
 var _fig: Node3D       ## ateşin başında dinlenen figür (nefes alıp veriyormuş gibi)
@@ -56,7 +56,7 @@ func _build() -> void:
 	var top := VBoxContainer.new()
 	top.set_anchors_preset(Control.PRESET_TOP_WIDE)
 	top.alignment = BoxContainer.ALIGNMENT_CENTER
-	top.offset_top = 48
+	top.offset_top = 130
 	top.add_theme_constant_override("separation", 6)
 	top.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(top)
@@ -146,31 +146,23 @@ func _build_background() -> void:
 	for ix in range(-2, 3):
 		_place(world, "wall.gltf.glb", Vector3(ix * 4.0, 0, -6.0), 0.0)
 
-	# sütunlar — derinlik için, simetrik olduğundan yön sorunu yok
-	_place(world, "column.gltf.glb", Vector3(-5.5, 0, -2.0))
-	_place(world, "column.gltf.glb", Vector3(5.5, 0, -2.0))
+	# sütunlar — duvarın iki ucunda, kadrajı çerçeveler
+	_place(world, "column.gltf.glb", Vector3(-4.4, 0, -5.3))
+	_place(world, "column.gltf.glb", Vector3(4.6, 0, -5.3))
 
-	# --- duvara yaslanmış, yorgun, ateşe bakan oturan zombi ---
-	# SitDown pozu "sandalye yüksekliğinde" asılı kalıyor → zombiyi indirip
-	# altına taş oturak koyuyoruz: ateş başında taşta oturma görüntüsü.
-	var fig_pos := Vector3(0.85, -0.25, -5.45)
-	var seat := MeshInstance3D.new()
-	var seat_mesh := BoxMesh.new()
-	seat_mesh.size = Vector3(0.62, 0.36, 0.55)
-	seat.mesh = seat_mesh
-	var seat_mat := StandardMaterial3D.new()
-	seat_mat.albedo_color = Color(0.2, 0.2, 0.22)
-	seat_mat.roughness = 0.95
-	seat.material_override = seat_mat
-	seat.position = Vector3(fig_pos.x, 0.18, fig_pos.z - 0.05)
-	seat.rotation_degrees.y = 14.0
-	world.add_child(seat)
+	# --- ateşin başında taburede oturan yorgun zombi ---
+	# SitDown son karesinde kemik ölçümü (prob): kalça lokal (0, 0.57, -0.42),
+	# ayaklar yerde (y 0.02, z -0.05). Scale 0.9 → kalça 0.51 yükseklikte,
+	# root'un 0.38 gerisinde. Tabure üstü 0.5 → fig_y ≈ 0, tabure kalçanın altında
+	# (yaw -20°'ye göre döndürülmüş offset: +0.13x, -0.36z).
+	var fig_pos := Vector3(2.3, -0.01, -4.5)
+	_place(world, "stool.gltf.glb", Vector3(fig_pos.x + 0.13, 0, fig_pos.z - 0.36), -20.0)
 	_fig = (load(ZOMBIE_MODEL) as PackedScene).instantiate()
-	_fig.scale = Vector3.ONE * 0.75
+	_fig.scale = Vector3.ONE * 0.9
 	_fig.position = fig_pos
-	# GLTF modelin doğal yüzü +Z (zombie.gd'de mount içinde 180° çevrilmesinden
-	# kanıtlı). Ateş +Z tarafında → ~0° ateşe bakar; 12° hafif 3/4 verir.
-	_fig.rotation_degrees.y = 12.0
+	# GLTF modelin doğal yüzü +Z (zombie.gd'den kanıtlı). Ateş sol-önde →
+	# hafif sola dönük (-20°) ateşe bakar.
+	_fig.rotation_degrees.y = -20.0
 	_fig_rot = -6.0                   # geriye, duvara yaslanmış
 	world.add_child(_fig)
 	var fig_anim: AnimationPlayer = _fig.find_child("AnimationPlayer", true, false)
@@ -181,20 +173,35 @@ func _build_background() -> void:
 		fig_anim.seek(sit.length, true)  # oturmuş son karede dondur
 		fig_anim.pause()
 
-	# --- kamp ateşi: oturan figürün önünde ---
-	var fire_pos := Vector3(fig_pos.x - 0.3, 0, fig_pos.z + 1.4)
-	_build_campfire(world, fire_pos)
-	# çevre proplar — duvara girmesinler diye öne/yana çekildi
-	_place(world, "barrel_large.gltf.glb", Vector3(fig_pos.x + 2.4, 0, fig_pos.z + 1.0))
-	_place(world, "crates_stacked.gltf.glb", Vector3(fig_pos.x - 2.5, 0, fig_pos.z + 1.2))
+	# --- kamp ateşi: zombinin sol-önünde, kadrajda butonların sağında ---
+	_build_campfire(world, Vector3(1.5, 0, -3.85))
+	# çevre proplar: sol taraf boş kalmasın → kasa + fıçı + duvarda meşale
+	_place(world, "crates_stacked.gltf.glb", Vector3(-3.2, 0, -4.5), 8.0)
+	_place(world, "barrel_small.gltf.glb", Vector3(-2.1, 0, -4.2), -20.0)
+	_place(world, "torch_lit.gltf.glb", Vector3(-1.55, 1.45, -5.45))
+	var torch_light := OmniLight3D.new()
+	torch_light.light_color = Color(1.0, 0.6, 0.25)
+	torch_light.light_energy = 1.1
+	torch_light.omni_range = 4.5
+	torch_light.position = Vector3(-1.55, 2.05, -5.0)
+	world.add_child(torch_light)
+	_place(world, "barrel_large.gltf.glb", Vector3(4.75, 0, -4.6))
 
 	# --- dinlenen savaşçının silahları ---
-	# Tüfek + pompalı: zombinin iki yanında, namlu yukarı, hafif geriye yatık →
-	# duvara dayalı. (Uzun eksen lokal +Y; X'te negatif eğim tepeyi -Z duvara yaslar.)
-	_place_weapon(world, "Rifle.fbx", Vector3(fig_pos.x + 1.7, 0, fig_pos.z + 0.1), Vector3(-16, -25, 0), 0.12)
-	_place_weapon(world, "Shotgun.fbx", Vector3(fig_pos.x + 0.95, 0, fig_pos.z + 0.12), Vector3(-14, -20, 0), 0.12)
-	# Tabanca: zombinin hemen önünde yerde yatık
-	_place_weapon(world, "Pistol.fbx", Vector3(fig_pos.x + 0.45, 0, fig_pos.z + 0.75), Vector3(0, 50, 0), 0.07)
+	# Tüfek + pompalı: zombinin iki yanında duvara yaslı. Prob renderdan kanıtlı:
+	# uzun eksen lokal Z, rotX=90 → namlu yukarı dik, 90-18=72 → tepe duvara
+	# yatık. 0.3 scale ≈ 1m gerçek boy (0.12 minicikti, o yüzden görünmüyordu).
+	# rotZ=90 (roll, namlu ekseni etrafında) → yassı profil kameraya döner,
+	# yoksa silah inceltilmiş çubuk gibi kenarından görünür.
+	# Tüfek dik yaslanınca hep kenarından (ince çubuk) okunuyor → yere seriyoruz;
+	# yatayken üstten profili net (prob renderdan kanıtlı), kamera da yukarıdan bakıyor.
+	# Varilden uzak (varil yarıçapı 0.9, sol kenarı x≈3.85) → dipçik girmesin.
+	# yaw 200 → namlu ucu kameraya (ekrana) dönük, ateşten uzak
+	_place_weapon(world, "Rifle.fbx", Vector3(3.0, 0, -4.25), Vector3(0, 200, 0), 0.3)
+	_place_weapon(world, "Shotgun.fbx", Vector3(1.55, 0, -5.25), Vector3(72, 10, 90), 0.3)
+	# Tabanca: ateşin sağında açık zeminde (tabanca modeli içsel ~4x büyük → 0.07)
+	# rotX=90 → yan yatar (dik durmasın/havada görünmesin), uzun ekseni lokal X
+	_place_weapon(world, "Pistol.fbx", Vector3(0.8, 0.08, -3.35), Vector3(90, -35, 0), 0.07)
 
 
 func _build_campfire(world: Node3D, pos: Vector3) -> void:

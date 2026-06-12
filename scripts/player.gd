@@ -21,6 +21,7 @@ const FOOTSTEPS := [
 
 var health: float
 var lifesteal := 0.0  ## kartlarla artar; verilen hasarın bu oranı kadar iyileşir
+var pickup_radius := 2.2  ## yerdeki altın/XP'nin mıknatıslanma mesafesi (Mıknatıs kartıyla artar)
 var dead := false
 
 var _step_player: AudioStreamPlayer

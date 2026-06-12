@@ -1,11 +1,26 @@
 extends Node3D
-## Şato katı: labirent + odalar üretir, KayKit parçalarıyla döşer, düşman doğurur,
-## çıkışa ulaşınca sonraki kata geçirir.
+## Kat üreticisi — biome'a göre üç mod:
+##  - garden (kat 1-5): açık havada çim/çit (hedge) labirenti, gün ışığı
+##  - garden_boss (kat 6): şato bahçesi arenası, Çürümüş Bahçıvan boss'u
+##  - castle (kat 7-11): mevcut şato zindanı (KayKit)
+## Çıkış portalı kilitli başlar: kat kotası kadar zombi ölünce açılır.
 
 const CELL := 4.0
 const WALL_H := 4.0
+const HEDGE_H := 2.8
+const ARENA_CELLS := 9  ## boss arenası kenarı (hücre; tek sayı → kapı tam ortada)
 const KAYKIT := "res://addons/kaykit_dungeon_remastered/assets/gltf/"
+const HW := "res://addons/kaykit_halloween_bits/Assets/gltf/"  ## mezarlık/bahçe süs paketi
+const SKELETON_MINION := "res://addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Minion.glb"
+const SKELETON_WARRIOR := "res://addons/kaykit_character_pack_skeletons/Characters/gltf/Skeleton_Warrior.glb"
+const SKELETON_BASE_SCALE := 0.85  ## iskelet modeli bu ölçekte ~1.85m (zombi 0.6 gibi)
 const CHEST_SCRIPT := preload("res://scripts/chest.gd")
+
+const OUTER_TREES := [
+	"tree_pine_yellow_large.gltf", "tree_pine_orange_large.gltf",
+	"tree_pine_orange_medium.gltf", "tree_dead_large.gltf", "tree_dead_medium.gltf",
+]
+const NATURE := "res://addons/kenney_nature_kit/"  ## çim/çiçek/mantar modelleri (CC0)
 
 const FLOOR_PIECES := {
 	"floor_tile_large.gltf.glb": 90,
@@ -29,17 +44,50 @@ const MAX_TORCHES := 30
 var maze := {}
 var rng := RandomNumberGenerator.new()
 var player: Node3D
+var _biome := "castle"
 var _alive := 0
 var _stage_over := false
 var _torch_count := 0
 var _piece_cache := {}
 var _stage_label: Label
+var _stage_title: Label  ## kat giriş başlığı ("ŞATO BAHÇESİ — BÖLÜM 1" vb.)
 var _fade: ColorRect
+var _intro_active := false  ## açılış hikâye ekranı gösteriliyor
+var _story_layer: CanvasLayer
+var _story_tween: Tween
+var _story_flag := "intro_shown"  ## dismiss'te Game'de işaretlenecek bayrak
 var _exit_near := false
 var _exit_prompt: Label3D
 var _exit_screen_prompt: Control
+var _exit_action_label: Label
 var _exit_open := Vector3(0, 0, 1)   ## koridorun çıkışa bağlandığı açık yön
 var _exit_back := Vector3(0, 0, -1)  ## kemerin/odanın açıldığı arka yön
+
+# çıkış kilidi: kota kadar zombi ölmeden portal açılmaz
+var _kills_needed := 0
+var _kills_done := 0
+var _exit_unlocked := false
+var _ring_mat: StandardMaterial3D
+var _disc_mat: StandardMaterial3D
+var _portal_light: OmniLight3D
+
+# boss arenası
+var _boss: Node3D
+var _boss_phase2 := false
+var _boss_bar: ProgressBar
+var _boss_name := ""
+var _arena_size := Vector2.ZERO  ## boss alanının (x, z) boyutu
+var _gate_pos := Vector3.ZERO    ## boss ölünce portalın doğacağı nokta
+var _gate_leaves: Array[Node3D] = []  ## kemer kapı kanatları (arkadan kapanır)
+var _gate_leaf_cols: Array[Node] = []
+var _gate_body: StaticBody3D
+var _gate_closed := false
+var _chest_cells := {}           ## sandık konan çıkmaz hücreler (süs çakışmasın)
+var _hedge_mats: Array[StandardMaterial3D] = []
+var _nature_mesh_cache := {}  ## Kenney nature kit: dosya -> Mesh (MultiMesh için)
+var _grass_mat: StandardMaterial3D  ## çim zemin materyali (koridor zemini de kullanır)
+var _hedge_top_xforms: Array[Transform3D] = []   ## çit üstünden taşan öbekler
+var _hedge_face_xforms: Array[Transform3D] = []  ## çit yüzünden fışkıran filizler
 
 
 func _ready() -> void:
@@ -47,12 +95,30 @@ func _ready() -> void:
 		Game.run_seed = randi()
 	rng.seed = Game.run_seed + Game.stage * 7919
 	Music.play_game()
-
-	var grow := mini(Game.stage - 1, 4)
-	maze = MazeGen.generate(maze_w + grow, maze_h + grow, rng.randi(), 0.25)
+	_biome = Game.biome()
 
 	player = get_tree().get_first_node_in_group("player")
 	player.died.connect(_on_player_died)
+
+	# el feneri zindan içindir; gün ışığında yakındaki açık taşları patlatıp
+	# gökyüzüne karıştırıyor (kemer görünmezliği bu yüzdendi)
+	if _biome == "garden" or _biome == "garden_boss":
+		var lantern := player.get_node_or_null("Camera/Lantern")
+		if lantern != null:
+			lantern.visible = false
+
+	if _biome == "garden_boss":
+		_build_boss_arena()
+		return
+	if _biome == "castle_boss":
+		_build_castle_hall()
+		return
+
+	var grow := mini(Game.biome_stage() - 1, 4) + (2 if _biome == "castle" else 0)
+	maze = MazeGen.generate(maze_w + grow, maze_h + grow, rng.randi(), 0.25)
+	if _biome == "castle":
+		maze.v_walls[0][0] = false  # batı sınırı: şato giriş kapısı buraya açılır
+
 	player.global_position = _cell_center(Vector2i.ZERO) + Vector3(0, 0.2, 0)
 	for d: Vector2i in MazeGen.DIRS:
 		var n: Vector2i = Vector2i.ZERO + d
@@ -61,13 +127,24 @@ func _ready() -> void:
 			player.rotation.y = atan2(-float(d.x), -float(d.y))
 			break
 
+	_kills_needed = clampi(6 + 2 * Game.stage, 8, 22)
+
+	if _biome == "garden":
+		_setup_garden_environment()
 	_compute_exit_dirs()
 	_build_floors_and_walls()
-	_build_ceiling()
+	if _biome == "castle":
+		_build_ceiling()
 	_build_exit()
 	_build_rooms()
 	_build_props_and_chests()
+	if _biome == "garden":
+		_decorate_garden()
+		_flush_wall_tufts()
+	elif _biome == "castle":
+		_build_castle_entrance()
 	_build_stage_ui()
+	_update_exit_lock()
 
 	nav.bake_navigation_mesh()
 	await nav.bake_finished
@@ -94,14 +171,17 @@ func _build_floors_and_walls() -> void:
 	floor_shape.position = Vector3(maze.w * CELL / 2.0, -0.5, maze.h * CELL / 2.0)
 	walls_body.add_child(floor_shape)
 
-	for x in maze.w:
-		for y in maze.h:
-			# çıkış hücresi: halkanın altı pürüzsüz kalsın diye hep düz karo
-			var fp := "floor_tile_large.gltf.glb" if Vector2i(x, y) == maze.exit \
-					else _pick_weighted(FLOOR_PIECES)
-			var tile := _spawn_piece(fp, nav)
-			tile.position = _cell_center(Vector2i(x, y))
-			# tutarlı ızgara görünümü: serbest dönüş yok
+	if _biome == "garden":
+		_build_grass_floor(Vector2(maze.w * CELL, maze.h * CELL))
+	else:
+		for x in maze.w:
+			for y in maze.h:
+				# çıkış hücresi: halkanın altı pürüzsüz kalsın diye hep düz karo
+				var fp := "floor_tile_large.gltf.glb" if Vector2i(x, y) == maze.exit \
+						else _pick_weighted(FLOOR_PIECES)
+				var tile := _spawn_piece(fp, nav)
+				tile.position = _cell_center(Vector2i(x, y))
+				# tutarlı ızgara görünümü: serbest dönüş yok
 
 	for x in maze.w + 1:
 		for y in maze.h:
@@ -111,6 +191,9 @@ func _build_floors_and_walls() -> void:
 		for y in maze.h + 1:
 			if maze.h_walls[x][y]:
 				_place_wall(walls_body, Vector3((x + 0.5) * CELL, 0, y * CELL), false)
+
+	if _biome == "garden":
+		return  # çitler köşelerde zaten taşarak birleşiyor, sütun gerekmez
 
 	# kavşak noktalarına sütun: dik duvarların buluştuğu köşe boşluklarını kapatır
 	for x in maze.w + 1:
@@ -131,11 +214,14 @@ func _build_floors_and_walls() -> void:
 
 
 func _place_wall(walls_body: StaticBody3D, pos: Vector3, vertical: bool) -> void:
-	var piece := _spawn_piece(_pick_weighted(WALL_PIECES), nav)
-	piece.position = pos
-	if vertical:
-		piece.rotation.y = PI / 2.0
-	# tutarlı yönelim: rastgele çevirme yok
+	if _biome == "garden":
+		_place_hedge(pos, vertical)
+	else:
+		var piece := _spawn_piece(_pick_weighted(WALL_PIECES), nav)
+		piece.position = pos
+		if vertical:
+			piece.rotation.y = PI / 2.0
+		# tutarlı yönelim: rastgele çevirme yok
 
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -143,6 +229,9 @@ func _place_wall(walls_body: StaticBody3D, pos: Vector3, vertical: bool) -> void
 	col.shape = box
 	col.position = pos + Vector3(0, WALL_H / 2.0, 0)
 	walls_body.add_child(col)
+
+	if _biome == "garden":
+		return  # gün ışığında meşale olmaz
 
 	if _torch_count < MAX_TORCHES and rng.randf() < 0.16:
 		_torch_count += 1
@@ -157,6 +246,518 @@ func _place_wall(walls_body: StaticBody3D, pos: Vector3, vertical: bool) -> void
 		light.omni_range = 6.0
 		light.position = torch.position + offset.normalized() * 0.4 + Vector3(0, 0.45, 0)
 		nav.add_child(light)
+
+
+# ---------- bahçe (hedge) biome'u ----------
+
+func _place_hedge(pos: Vector3, vertical: bool, height := HEDGE_H, length := CELL + 0.7) -> void:
+	## İngiliz bahçesi çiti: noise dokulu yeşil kutu — köşeler kapansın diye hücreden uzun
+	if _hedge_mats.is_empty():
+		# yaprak kümesi görünümü: hücresel noise (yumru yumru) + koyu-açık yeşil renk rampası
+		var noise := FastNoiseLite.new()
+		noise.seed = 7
+		noise.noise_type = FastNoiseLite.TYPE_CELLULAR
+		noise.cellular_return_type = FastNoiseLite.RETURN_DISTANCE2_SUB
+		noise.frequency = 0.09
+		noise.fractal_type = FastNoiseLite.FRACTAL_FBM
+		noise.fractal_octaves = 3
+		var ramp := Gradient.new()
+		ramp.set_color(0, Color(0.03, 0.10, 0.03))   # derin gölge yeşili
+		ramp.set_color(1, Color(0.58, 0.78, 0.30))   # güneş vuran uç yapraklar
+		ramp.add_point(0.42, Color(0.10, 0.30, 0.08))
+		ramp.add_point(0.72, Color(0.30, 0.55, 0.18))
+		var albedo_tex := NoiseTexture2D.new()
+		albedo_tex.noise = noise
+		albedo_tex.seamless = true
+		albedo_tex.color_ramp = ramp
+		var normal_tex := NoiseTexture2D.new()
+		normal_tex.noise = noise
+		normal_tex.seamless = true
+		normal_tex.as_normal_map = true
+		normal_tex.bump_strength = 16.0
+		for tint in [Color(1.0, 1.0, 1.0), Color(0.88, 0.95, 0.84), Color(1.06, 1.04, 0.92)]:
+			var m := StandardMaterial3D.new()
+			m.albedo_color = tint  # renk rampadan gelir; ton farkı çit çeşitliliği verir
+			m.albedo_texture = albedo_tex
+			m.normal_enabled = true
+			m.normal_texture = normal_tex
+			m.uv1_triplanar = true
+			m.uv1_scale = Vector3(1.1, 1.1, 1.1)  # iri yumrular: uzaktan da okunur
+			m.roughness = 1.0
+			_hedge_mats.append(m)
+
+	var hedge := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	var h := height * rng.randf_range(0.96, 1.05)
+	box.size = Vector3(length, h, 1.1)
+	box.material = _hedge_mats[rng.randi() % _hedge_mats.size()]
+	hedge.mesh = box
+	hedge.position = pos + Vector3(0, h / 2.0, 0)
+	if vertical:
+		hedge.rotation.y = PI / 2.0
+	nav.add_child(hedge)
+
+	# çitin üstünden taşan öbekler + yüzeyden fışkıran filizler ("hafif çim efekti")
+	var along := Vector3(0, 0, 1) if vertical else Vector3(1, 0, 0)
+	var normal := Vector3(1, 0, 0) if vertical else Vector3(0, 0, 1)
+	for i in rng.randi_range(2, 4):
+		var t := rng.randf_range(-length / 2.0 + 0.3, length / 2.0 - 0.3)
+		var s := rng.randf_range(1.4, 2.2)
+		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * s)
+		_hedge_top_xforms.append(Transform3D(b,
+				pos + along * t + normal * rng.randf_range(-0.25, 0.25) + Vector3(0, h - 0.05, 0)))
+	for side: float in [-1.0, 1.0]:
+		if rng.randf() < 0.6:
+			var t2 := rng.randf_range(-length / 2.0 + 0.3, length / 2.0 - 0.3)
+			var yy := rng.randf_range(0.5, h - 0.5)
+			# dışarı doğru eğik filiz: UP'ı duvar normaline yatır
+			var lean: Vector3 = (Vector3.UP * 0.55 + normal * side).normalized()
+			var b2 := Basis(Quaternion(Vector3.UP, lean)) \
+					.scaled(Vector3.ONE * rng.randf_range(1.0, 1.8))
+			_hedge_face_xforms.append(Transform3D(b2,
+					pos + along * t2 + normal * side * 0.5 + Vector3(0, yy, 0)))
+
+
+func _build_grass_floor(size_xz: Vector2) -> void:
+	# gerçek çim fotoğraf dokusu (ambientCG Grass004, CC0) + normal map
+	var grass := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(size_xz.x + 8.0, 0.1, size_xz.y + 8.0)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_texture = load("res://assets/textures/grass/grass_color.jpg")
+	mat.normal_enabled = true
+	mat.normal_texture = load("res://assets/textures/grass/grass_normal.jpg")
+	mat.uv1_triplanar = true
+	mat.uv1_scale = Vector3(0.35, 0.35, 0.35)  # ~2.9 m'de bir döşenir
+	mat.roughness = 1.0
+	_grass_mat = mat
+	box.material = mat
+	grass.mesh = box
+	grass.position = Vector3(size_xz.x / 2.0, -0.045, size_xz.y / 2.0)
+	nav.add_child(grass)
+
+	_scatter_ground_tufts(size_xz)
+
+
+func _nature_mesh(file: String) -> Mesh:
+	## Kenney glb'sinden Mesh'i çıkar (MultiMesh tek Mesh ister).
+	## DİKKAT: Kenney GLB'leri metallic=1 + camgöbeği folaj rengiyle geliyor —
+	## metalik kapatılır, folaj yüzeyleri sahnedeki yeşile boyanır (kırmızı/beyaz kalır).
+	if not _nature_mesh_cache.has(file):
+		var inst: Node = (load(NATURE + file) as PackedScene).instantiate()
+		var mis := inst.find_children("*", "MeshInstance3D", true, false)
+		if inst is MeshInstance3D:
+			mis.push_front(inst)
+		var mesh: Mesh = (mis[0] as MeshInstance3D).mesh.duplicate()
+		for i in mesh.get_surface_count():
+			var mat := mesh.surface_get_material(i)
+			if mat is BaseMaterial3D:
+				var m: BaseMaterial3D = mat.duplicate()
+				m.metallic = 0.0
+				m.roughness = 1.0
+				var c := m.albedo_color
+				if c.b > 0.5 and c.r < 0.6 and c.g > 0.7:  # camgöbeği "grass" yüzeyi
+					m.albedo_color = Color(0.30, 0.52, 0.20)
+				mesh.surface_set_material(i, m)
+		_nature_mesh_cache[file] = mesh
+		inst.free()
+	return _nature_mesh_cache[file]
+
+
+func _spawn_multimesh(mesh: Mesh, xforms: Array[Transform3D]) -> void:
+	if xforms.is_empty():
+		return
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = mesh
+	mm.instance_count = xforms.size()
+	for i in xforms.size():
+		mm.set_instance_transform(i, xforms[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(mmi)
+
+
+func _scatter_model(file: String, count: int, smin: float, smax: float, size_xz: Vector2) -> void:
+	var xforms: Array[Transform3D] = []
+	for i in count:
+		var s := rng.randf_range(smin, smax)
+		var b := Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3.ONE * s)
+		xforms.append(Transform3D(b, Vector3(rng.randf_range(0.4, size_xz.x - 0.4), 0.0,
+				rng.randf_range(0.4, size_xz.y - 0.4))))
+	_spawn_multimesh(_nature_mesh(file), xforms)
+
+
+func _scatter_ground_tufts(size_xz: Vector2) -> void:
+	## gerçek çim hissi: Kenney çim öbekleri + harita başına tek tür çiçek + tek tük mantar
+	var area := size_xz.x * size_xz.y
+	_scatter_model("grass.glb", mini(int(area * 0.30), 650), 1.2, 2.2, size_xz)
+	_scatter_model("grass_large.glb", mini(int(area * 0.15), 320), 1.1, 2.0, size_xz)
+	_scatter_model("grass_leafsLarge.glb", mini(int(area * 0.06), 150), 1.0, 1.8, size_xz)
+	var flower: String = ["flower_purpleA.glb", "flower_redA.glb",
+			"flower_yellowA.glb", "flower_yellowC.glb"][rng.randi() % 4]
+	_scatter_model(flower, mini(int(area * 0.04), 100), 1.3, 2.0, size_xz)
+	var mushroom: String = "mushroom_red.glb" if rng.randf() < 0.5 else "mushroom_tan.glb"
+	_scatter_model(mushroom, mini(int(area * 0.012), 30), 1.2, 1.8, size_xz)
+
+
+func _flush_wall_tufts() -> void:
+	## çit üstü/yüzü için biriktirilen yeşillik transformlarını iki MultiMesh'te bas
+	_spawn_multimesh(_nature_mesh("grass_large.glb"), _hedge_top_xforms)
+	_spawn_multimesh(_nature_mesh("grass_leafs.glb"), _hedge_face_xforms)
+	_hedge_top_xforms = []
+	_hedge_face_xforms = []
+
+
+func _setup_garden_environment(boss := false) -> void:
+	## zindan ortamını açık hava bahçesine çevir (resource paylaşımlı: önce kopyala)
+	var we: WorldEnvironment = $WorldEnvironment
+	var env: Environment = we.environment.duplicate()
+	we.environment = env
+
+	var sky_mat := ProceduralSkyMaterial.new()
+	if boss:
+		# boss arenası: altın saat — dramatik gün batımı
+		sky_mat.sky_top_color = Color(0.25, 0.32, 0.55)
+		sky_mat.sky_horizon_color = Color(0.95, 0.62, 0.38)
+		sky_mat.ground_horizon_color = Color(0.85, 0.58, 0.38)
+	else:
+		sky_mat.sky_top_color = Color(0.33, 0.52, 0.82)
+		sky_mat.sky_horizon_color = Color(0.72, 0.80, 0.86)
+		sky_mat.ground_horizon_color = Color(0.66, 0.74, 0.78)
+	sky_mat.ground_bottom_color = Color(0.18, 0.26, 0.13)
+	env.background_mode = Environment.BG_SKY
+	env.sky = Sky.new()
+	env.sky.sky_material = sky_mat
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.ambient_light_energy = 1.5  # gölgedeki çit yüzlerinde doku kaybolmasın
+	env.fog_light_color = Color(0.92, 0.74, 0.55) if boss else Color(0.76, 0.83, 0.88)
+	env.fog_density = 0.005
+
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-24.0 if boss else -46.0, -38.0, 0)
+	sun.light_color = Color(1.0, 0.72, 0.45) if boss else Color(1.0, 0.95, 0.85)
+	sun.light_energy = 1.3
+	sun.shadow_enabled = true
+	add_child(sun)
+
+
+func _outer_tree_ring(size_xz: Vector2, south_gap_x := -1000.0) -> void:
+	## çit duvarların DIŞINA çam/ölü ağaç silüeti — labirente derinlik katar (collision yok)
+	## south_gap_x: güney sırada bu x civarı boş bırakılır (arena çıkış koridoru için)
+	var step := 6.5
+	var t := -4.0
+	while t < size_xz.x + 4.0:
+		for z in [-3.2, size_xz.y + 3.2]:
+			if z > 0.0 and absf(t - south_gap_x) < 5.5:
+				continue  # koridorun üstüne ağaç dikme
+			if rng.randf() < 0.8:
+				var tr := _spawn_piece(HW + OUTER_TREES[rng.randi() % OUTER_TREES.size()], self)
+				tr.position = Vector3(t + rng.randf_range(-1.6, 1.6), 0, z + signf(z) * rng.randf_range(0.0, 2.5))
+				tr.rotation.y = rng.randf() * TAU
+		t += step
+	t = -4.0
+	while t < size_xz.y + 4.0:
+		for x in [-3.2, size_xz.x + 3.2]:
+			if rng.randf() < 0.8:
+				var tr := _spawn_piece(HW + OUTER_TREES[rng.randi() % OUTER_TREES.size()], self)
+				tr.position = Vector3(x + signf(x) * rng.randf_range(0.0, 2.5), 0, t + rng.randf_range(-1.6, 1.6))
+				tr.rotation.y = rng.randf() * TAU
+		t += step
+
+
+func _decorate_garden() -> void:
+	_outer_tree_ring(Vector2(maze.w * CELL, maze.h * CELL))
+
+	# sandık çıkmamış çıkmaz sokaklara mezar
+	for cell: Vector2i in maze.dead_ends:
+		if _chest_cells.has(cell) or rng.randf() > 0.55:
+			continue
+		var piece: String = ["grave_A.gltf", "grave_B.gltf", "gravestone.gltf"][rng.randi() % 3]
+		_spawn_prop(HW + piece, _cell_center(cell) + Vector3(rng.randf_range(-0.5, 0.5), 0, rng.randf_range(-0.5, 0.5)),
+				rng.randf_range(-0.3, 0.3))
+
+	# koridor kenarlarına küçük süsler: haç, kafatası, balkabağı, fener (yol kapatmaz)
+	for cell: Vector2i in maze.dist:
+		if cell == Vector2i.ZERO or cell == maze.exit \
+				or maze.room_cells.has(cell) or _chest_cells.has(cell):
+			continue
+		var r := rng.randf()
+		if r > 0.16:
+			continue
+		# duvar olan bir yön bul, süsü o kenara yasla
+		var side := Vector2i.ZERO
+		for d: Vector2i in MazeGen.DIRS:
+			var n: Vector2i = cell + d
+			var outside: bool = n.x < 0 or n.x >= int(maze.w) or n.y < 0 or n.y >= int(maze.h)
+			if outside or MazeGen.has_wall_between(maze.v_walls, maze.h_walls, cell, n):
+				side = d
+				break
+		if side == Vector2i.ZERO:
+			continue
+		var pos := _cell_center(cell) + Vector3(side.x, 0, side.y) * 1.35
+		var yaw := atan2(-side.x, -side.y)  # süs koridora baksın
+		if r < 0.08:
+			var deco := _spawn_piece(HW + ("gravemarker_A.gltf" if rng.randf() < 0.6 else "gravemarker_B.gltf"), self)
+			deco.position = pos
+			deco.rotation.y = yaw + rng.randf_range(-0.25, 0.25)
+		elif r < 0.12:
+			var deco := _spawn_piece(HW + ("skull.gltf" if rng.randf() < 0.5 else "pumpkin_orange_small.gltf"), self)
+			deco.position = pos
+			deco.rotation.y = rng.randf() * TAU
+		else:
+			var deco := _spawn_piece(HW + "lantern_standing.gltf", self)
+			deco.position = pos
+			deco.rotation.y = yaw
+
+
+func _close_arena_gate() -> void:
+	## oyuncu arenaya inince demir kanatlar gürültüyle kapanır — geri dönüş yok
+	if _gate_closed:
+		return
+	_gate_closed = true
+	var tween := create_tween()
+	tween.set_parallel()
+	for leaf in _gate_leaves:
+		tween.tween_property(leaf, "rotation:y", 0.0, 0.55) \
+				.set_trans(Tween.TRANS_QUAD).set_ease(Tween.EASE_IN)
+	tween.set_parallel(false)
+	tween.tween_callback(func() -> void:
+		var snd := AudioStreamPlayer3D.new()
+		snd.stream = load("res://assets/audio/sfx/gate_close.ogg")
+		snd.unit_size = 5.0
+		snd.volume_db = 2.0
+		add_child(snd)
+		snd.global_position = _gate_body.global_position + Vector3(0, 1.4, 0)
+		snd.play()
+		snd.finished.connect(snd.queue_free))
+	# V hunisi collision'ları yerine düz kapalı kapı çubuğu
+	for c in _gate_leaf_cols:
+		c.queue_free()
+	_gate_leaf_cols.clear()
+	var col := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3(3.2, 2.7, 0.18)
+	col.shape = box
+	col.position = Vector3(0, 1.35, 0)
+	_gate_body.add_child(col)
+
+
+func _mist_plane(pos: Vector3, size: Vector2, color: Color, yaw := 0.0) -> void:
+	## ucuz "sis perdesi": yarı saydam düzlem — arkası mesafeyle kaybolur hissi
+	var quad := QuadMesh.new()
+	quad.size = size
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.albedo_color = color
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	var mi := MeshInstance3D.new()
+	mi.mesh = quad
+	mi.material_override = mat
+	mi.position = pos
+	mi.rotation.y = yaw
+	add_child(mi)
+
+
+func _build_castle_silhouette(w: float) -> void:
+	## kuzey kapının ardında, gün batımına karşı kara şato silüeti
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.13, 0.10, 0.16)
+	mat.roughness = 1.0
+	var cx := w / 2.0
+
+	var keep := MeshInstance3D.new()
+	var kbox := BoxMesh.new()
+	kbox.size = Vector3(14.0, 13.0, 6.0)
+	kbox.material = mat
+	keep.mesh = kbox
+	keep.position = Vector3(cx, 6.5, -16.0)
+	add_child(keep)
+
+	for t in [[cx - 9.0, 16.0, 2.4, -14.0], [cx + 9.0, 16.0, 2.4, -14.0],
+			[cx - 15.0, 11.0, 1.8, -17.0], [cx + 15.0, 11.0, 1.8, -17.0]]:
+		var tower := MeshInstance3D.new()
+		var cyl := CylinderMesh.new()
+		cyl.top_radius = t[2]
+		cyl.bottom_radius = t[2] * 1.15
+		cyl.height = t[1]
+		cyl.material = mat
+		tower.mesh = cyl
+		tower.position = Vector3(t[0], t[1] / 2.0, t[3])
+		add_child(tower)
+		var roof := MeshInstance3D.new()
+		var cone := CylinderMesh.new()
+		cone.top_radius = 0.05
+		cone.bottom_radius = t[2] * 1.35
+		cone.height = 3.6
+		cone.material = mat
+		roof.mesh = cone
+		roof.position = Vector3(t[0], t[1] + 1.8, t[3])
+		add_child(roof)
+
+	# birkaç sıcak pencere ışığı: silüet ölü durmasın
+	var win_mat := StandardMaterial3D.new()
+	win_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	win_mat.albedo_color = Color(1.0, 0.72, 0.3)
+	for i in 5:
+		var win := MeshInstance3D.new()
+		var q := QuadMesh.new()
+		q.size = Vector2(0.5, 0.9)
+		q.material = win_mat
+		win.mesh = q
+		win.position = Vector3(cx + rng.randf_range(-6.0, 6.0),
+				rng.randf_range(3.0, 11.0), -12.9)
+		add_child(win)
+
+
+func _decorate_arena(w: float) -> void:
+	_build_castle_silhouette(w)
+	_outer_tree_ring(Vector2(w, w), w / 2.0)
+
+	# batı duvarının dışında dev mezar evi (crypt 6×8×8) — çitlerin üstünden görünür
+	var crypt := _spawn_piece(HW + "crypt.gltf", self)
+	crypt.position = Vector3(-7.0, 0, w * 0.42)
+	crypt.rotation.y = -PI / 2.0
+	var crypt2 := _spawn_piece(HW + "crypt.gltf", self)
+	crypt2.position = Vector3(w + 7.0, 0, w * 0.66)
+	crypt2.rotation.y = PI / 2.0
+
+	# şato kapısının iki yanına fenerli direkler + sıcak ışık (gün batımında yanar)
+	for sx in [-4.2, 4.2]:
+		_spawn_prop(HW + "post_lantern.gltf", Vector3(w / 2.0 + sx, 0, 1.5), PI)
+		var light := OmniLight3D.new()
+		light.light_color = Color(1.0, 0.72, 0.35)
+		light.light_energy = 1.6
+		light.omni_range = 7.0
+		light.position = Vector3(w / 2.0 + sx, 3.0, 3.0)
+		add_child(light)
+
+	# koridordan kapıya uzanan taş yol + koridor ağzında (çitlerin arasında) mezarlık kemeri
+	var pz := w + 2.5
+	while pz > 4.5:
+		var tile := _spawn_piece(HW + ["path_A.gltf", "path_B.gltf", "path_C.gltf", "path_D.gltf"][rng.randi() % 4], self)
+		tile.position = Vector3(w / 2.0 + rng.randf_range(-0.35, 0.35), 0.01, pz)
+		tile.rotation.y = (rng.randi() % 4) * PI / 2.0
+		pz -= 1.9
+	# koridor ağzında demir kapılı mezarlık kemeri: çit hattına gömülü durur,
+	# kanatları HAFİF ARALIK — ortadaki boşluktan sığarak geçilir, demirlerden geçilmez
+	var arch := _spawn_piece(HW + "arch_gate.gltf", self)
+	var arch_z := w - 1.0
+	arch.position = Vector3(w / 2.0, 0, arch_z)
+	var leaf_open := deg_to_rad(58.0)
+	var left_leaf: Node3D = arch.find_child("arch_gate_left", true, false)
+	var right_leaf: Node3D = arch.find_child("arch_gate_right", true, false)
+	if left_leaf != null:
+		left_leaf.rotation.y = leaf_open
+		_gate_leaves.append(left_leaf)
+	if right_leaf != null:
+		right_leaf.rotation.y = -leaf_open
+		_gate_leaves.append(right_leaf)
+
+	_gate_body = StaticBody3D.new()
+	nav.add_child(_gate_body)
+	_gate_body.global_position = Vector3(w / 2.0, 0, arch_z)
+	for sgn: float in [-1.0, 1.0]:
+		# sütunlar
+		var pcol := CollisionShape3D.new()
+		var pbox := BoxShape3D.new()
+		pbox.size = Vector3(0.7, 4.4, 0.7)
+		pcol.shape = pbox
+		pcol.position = Vector3(sgn * 1.75, 2.2, 0)
+		_gate_body.add_child(pcol)
+		# aralık duran demir kanat: menteşeden koridora doğru V hunisi gibi açılır
+		# (kanat mesh'leri +z / koridor yönüne savruluyor — AABB ölçümüyle doğrulandı)
+		var dir := Vector3(-sgn * cos(leaf_open), 0, sin(leaf_open))
+		var lcol := CollisionShape3D.new()
+		var lbox := BoxShape3D.new()
+		lbox.size = Vector3(1.5, 2.6, 0.14)
+		lcol.shape = lbox
+		lcol.position = Vector3(sgn * 1.5, 1.3, 0) + dir * 0.75
+		lcol.rotation.y = atan2(-dir.z, dir.x)
+		_gate_body.add_child(lcol)
+		_gate_leaf_cols.append(lcol)
+
+	# kapıdan geçip arenaya inince kanatlar arkadan ÇARPARAK kapanır
+	var trigger := Area3D.new()
+	var tshape := CollisionShape3D.new()
+	var tbox := BoxShape3D.new()
+	tbox.size = Vector3(4.0, 3.0, 1.2)
+	tshape.shape = tbox
+	trigger.add_child(tshape)
+	trigger.position = Vector3(w / 2.0, 1.4, arch_z - 2.0)
+	trigger.body_entered.connect(func(body: Node3D) -> void:
+		if body.is_in_group("player"):
+			_close_arena_gate())
+	add_child(trigger)
+
+	# köşelere çitle çevrili mini mezarlıklar (kapı tarafı köşeleri)
+	for cx in [6.0, w - 6.0]:
+		for i in 3:
+			_spawn_prop(HW + ("grave_A.gltf" if rng.randf() < 0.5 else "grave_B.gltf"),
+					Vector3(cx + (i - 1) * 2.4, 0, 5.5 + rng.randf_range(-0.3, 0.3)), PI + rng.randf_range(-0.12, 0.12))
+		var marker := _spawn_piece(HW + "gravemarker_B.gltf", self)
+		marker.position = Vector3(cx, 0, 8.0)
+		marker.rotation.y = PI
+		# mezarlığın önüne demir çit + payanda
+		for fx in [-2.0, 2.0]:
+			var fence := _spawn_piece(HW + ("fence.gltf" if rng.randf() < 0.7 else "fence_broken.gltf"), self)
+			fence.position = Vector3(cx + fx, 0, 9.2)
+		var fpost := _spawn_piece(HW + "fence_pillar.gltf", self)
+		fpost.position = Vector3(cx, 0, 9.2)
+
+	# yan kenarlara mum dolu sunaklar + sıcak ışık
+	for sxs in [[7.0, 0.0], [w - 7.0, PI]]:
+		_spawn_prop(HW + "shrine_candles.gltf", Vector3(sxs[0], 0, w * 0.55), PI / 2.0 + sxs[1])
+		var slight := OmniLight3D.new()
+		slight.light_color = Color(1.0, 0.7, 0.35)
+		slight.light_energy = 1.0
+		slight.omni_range = 5.0
+		slight.position = Vector3(sxs[0], 1.6, w * 0.55)
+		add_child(slight)
+
+	# yol kenarına banklar, içeride ölü ağaçlar (collision'lı)
+	_spawn_prop(HW + "bench_decorated.gltf", Vector3(w / 2.0 - 3.2, 0, w * 0.62), PI / 2.0)
+	_spawn_prop(HW + "bench.gltf", Vector3(w / 2.0 + 3.2, 0, w * 0.74), -PI / 2.0)
+	for tp in [Vector3(8.5, 0, w * 0.52), Vector3(w - 9.0, 0, w * 0.42), Vector3(10.5, 0, w * 0.8)]:
+		_spawn_prop(HW + ("tree_dead_large.gltf" if rng.randf() < 0.5 else "tree_dead_medium.gltf"),
+				tp, rng.randf() * TAU)
+
+	# köşelerde sırıtan balkabağı fenerleri (içi ışıklı)
+	for jp in [Vector3(4.0, 0, w - 4.5), Vector3(w - 4.0, 0, w - 4.5),
+			Vector3(4.5, 0, w * 0.35), Vector3(w - 4.5, 0, w * 0.35)]:
+		var jack := _spawn_piece(HW + ("pumpkin_orange_jackolantern.gltf" if rng.randf() < 0.5
+				else "pumpkin_yellow_jackolantern.gltf"), self)
+		jack.position = jp
+		jack.rotation.y = rng.randf() * TAU
+		var jlight := OmniLight3D.new()
+		jlight.light_color = Color(1.0, 0.55, 0.15)
+		jlight.light_energy = 0.8
+		jlight.omni_range = 3.5
+		jlight.position = jp + Vector3(0, 0.6, 0)
+		add_child(jlight)
+
+	# çimde dağınık toprak/mezar yamaları — zemini tek renk olmaktan kurtarır
+	for i in 7:
+		var dirt := _spawn_piece(HW + ["floor_dirt.gltf", "floor_dirt_grave.gltf",
+				"floor_dirt_small.gltf"][rng.randi() % 3], self)
+		dirt.position = Vector3(rng.randf_range(6.0, w - 6.0), 0.02, rng.randf_range(10.0, w - 7.0))
+		dirt.rotation.y = (rng.randi() % 4) * PI / 2.0
+
+	# siper küplerinin dibine balkabağı/kemik kırıntıları
+	for off in [Vector3(w * 0.3, 0, w * 0.38), Vector3(w * 0.7, 0, w * 0.38),
+			Vector3(w * 0.3, 0, w * 0.72), Vector3(w * 0.7, 0, w * 0.72)]:
+		var deco := _spawn_piece(HW + ["pumpkin_orange_small.gltf", "pumpkin_yellow_small.gltf",
+				"bone_A.gltf", "ribcage.gltf"][rng.randi() % 4], self)
+		deco.position = off + Vector3(rng.randf_range(1.6, 2.2), 0, rng.randf_range(-1.0, 1.0))
+		deco.rotation.y = rng.randf() * TAU
+
+	# arenanın ortasına yakın dağınık kemikler
+	for i in 9:
+		var bone := _spawn_piece(HW + ["bone_A.gltf", "bone_B.gltf", "skull.gltf"][rng.randi() % 3], self)
+		bone.position = Vector3(rng.randf_range(8.0, w - 8.0), 0, rng.randf_range(10.0, w - 8.0))
+		bone.rotation.y = rng.randf() * TAU
 
 
 func _build_ceiling() -> void:
@@ -196,8 +797,10 @@ func _compute_exit_dirs() -> void:
 		_exit_open = Vector3(open_dir.x, 0, open_dir.y)
 		_exit_back = -_exit_open
 	# arka duvarı kaldır: kemerin açıklığı oraya gelecek, arkası duvar olmasın
-	var back_cell := exit + Vector2i(int(_exit_back.x), int(_exit_back.z))
-	_set_wall_open(exit, back_cell)
+	# (bahçede kemer/merdiven yok → çit yerinde kalır)
+	if _biome != "garden":
+		var back_cell := exit + Vector2i(int(_exit_back.x), int(_exit_back.z))
+		_set_wall_open(exit, back_cell)
 
 
 func _set_wall_open(a: Vector2i, b: Vector2i) -> void:
@@ -216,58 +819,62 @@ func _build_exit() -> void:
 	var open_dir := _exit_open
 	var back_dir := _exit_back
 
-	# açık kemerli geçit — içi görünür, arkadaki odaya bakar (arkası artık duvar değil)
-	var arch := _spawn_piece("wall_doorway.glb", self)
-	arch.position = center + back_dir * (CELL / 2.0)
-	arch.rotation.y = atan2(open_dir.x, open_dir.z)
+	if _biome == "castle":
+		# açık kemerli geçit — içi görünür, arkadaki odaya bakar (arkası artık duvar değil)
+		var arch := _spawn_piece("wall_doorway.glb", self)
+		arch.position = center + back_dir * (CELL / 2.0)
+		arch.rotation.y = atan2(open_dir.x, open_dir.z)
+		_build_exit_beyond(center, open_dir, back_dir)
 
-	_build_exit_beyond(center, open_dir, back_dir)
+	_spawn_portal(center + back_dir * 0.4)
 
-	# yerde yatay parlayan mavi neon halka
-	var ring_mat := StandardMaterial3D.new()
-	ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	ring_mat.albedo_color = Color(0.25, 0.7, 1.0)
-	ring_mat.emission_enabled = true
-	ring_mat.emission = Color(0.3, 0.75, 1.0)
-	ring_mat.emission_energy_multiplier = 4.0
+
+func _spawn_portal(pos: Vector3) -> void:
+	## yerde yatay parlayan neon halka; kilitliyken kırmızı, açılınca mavi
+	_ring_mat = StandardMaterial3D.new()
+	_ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_ring_mat.albedo_color = Color(0.25, 0.7, 1.0)
+	_ring_mat.emission_enabled = true
+	_ring_mat.emission = Color(0.3, 0.75, 1.0)
+	_ring_mat.emission_energy_multiplier = 4.0
 	var torus := TorusMesh.new()
 	torus.inner_radius = 0.95
 	torus.outer_radius = 1.25
 	var ring := MeshInstance3D.new()
 	ring.mesh = torus  # varsayılan: yatay (XZ düzlemi) — tam istenen
-	ring.material_override = ring_mat
-	ring.position = center + back_dir * 0.4 + Vector3(0, 0.12, 0)
+	ring.material_override = _ring_mat
+	ring.position = pos + Vector3(0, 0.12, 0)
 	add_child(ring)
 
 	# içteki parıltı diski (yerde)
-	var disc_mat := StandardMaterial3D.new()
-	disc_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	disc_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	disc_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
-	disc_mat.albedo_color = Color(0.3, 0.7, 1.0, 0.3)
+	_disc_mat = StandardMaterial3D.new()
+	_disc_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_disc_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_disc_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	_disc_mat.albedo_color = Color(0.3, 0.7, 1.0, 0.3)
 	var disc := MeshInstance3D.new()
 	var disc_mesh := CylinderMesh.new()
 	disc_mesh.top_radius = 0.95
 	disc_mesh.bottom_radius = 0.95
 	disc_mesh.height = 0.02
 	disc.mesh = disc_mesh
-	disc.material_override = disc_mat
+	disc.material_override = _disc_mat
 	disc.position = ring.position
 	add_child(disc)
 
-	var light := OmniLight3D.new()
-	light.light_color = Color(0.3, 0.7, 1.0)
-	light.light_energy = 3.0
-	light.omni_range = 6.0
-	light.shadow_enabled = true
-	light.position = ring.position + Vector3(0, 1.6, 0)
-	add_child(light)
+	_portal_light = OmniLight3D.new()
+	_portal_light.light_color = Color(0.3, 0.7, 1.0)
+	_portal_light.light_energy = 3.0
+	_portal_light.omni_range = 6.0
+	_portal_light.shadow_enabled = true
+	_portal_light.position = ring.position + Vector3(0, 1.6, 0)
+	add_child(_portal_light)
 
 	var spin := ring.create_tween().set_loops()
 	spin.tween_method(func(a: float) -> void: ring.rotation.y = a, 0.0, TAU, 5.0)
-	var pulse := light.create_tween().set_loops()
-	pulse.tween_property(light, "light_energy", 4.0, 1.1)
-	pulse.tween_property(light, "light_energy", 2.0, 1.1)
+	var pulse := _portal_light.create_tween().set_loops()
+	pulse.tween_property(_portal_light, "light_energy", 4.0, 1.1)
+	pulse.tween_property(_portal_light, "light_energy", 2.0, 1.1)
 
 	_exit_prompt = Label3D.new()
 	_exit_prompt.text = "ÇIKIŞ"
@@ -291,6 +898,29 @@ func _build_exit() -> void:
 	area.body_entered.connect(_on_exit_near.bind(true))
 	area.body_exited.connect(_on_exit_near.bind(false))
 	add_child(area)
+
+
+func _update_exit_lock() -> void:
+	## kota dolana kadar portal kırmızı + kilitli; dolunca maviye döner
+	if _exit_unlocked or _exit_prompt == null:
+		return
+	if _kills_done >= _kills_needed:
+		_exit_unlocked = true
+		_ring_mat.albedo_color = Color(0.25, 0.7, 1.0)
+		_ring_mat.emission = Color(0.3, 0.75, 1.0)
+		_disc_mat.albedo_color = Color(0.3, 0.7, 1.0, 0.3)
+		_portal_light.light_color = Color(0.3, 0.7, 1.0)
+		_exit_prompt.text = "ÇIKIŞ"
+		_exit_prompt.modulate = Color(0.45, 0.85, 1.0)
+		if _exit_near:
+			_exit_screen_prompt.visible = true
+	else:
+		_ring_mat.albedo_color = Color(0.95, 0.28, 0.22)
+		_ring_mat.emission = Color(1.0, 0.3, 0.22)
+		_disc_mat.albedo_color = Color(1.0, 0.3, 0.22, 0.25)
+		_portal_light.light_color = Color(1.0, 0.35, 0.25)
+		_exit_prompt.text = "KİLİTLİ — %d ZOMBİ" % (_kills_needed - _kills_done)
+		_exit_prompt.modulate = Color(1.0, 0.45, 0.38)
 
 
 func _build_exit_beyond(center: Vector3, _open_dir: Vector3, back_dir: Vector3) -> void:
@@ -354,12 +984,123 @@ func _build_exit_beyond(center: Vector3, _open_dir: Vector3, back_dir: Vector3) 
 	flick.tween_property(glow, "light_energy", 2.2, 0.6)
 
 
+func _build_castle_entrance() -> void:
+	## spawn'ın arkası boş duvar olmasın: kemerli giriş + sise kaybolan loş koridor
+	## + kapıdan içeri vuran soluk ışık hüzmesi ("buradan girdik" hissi)
+	var base := Vector3(0, 0, CELL * 0.5)
+	var doorway := _spawn_piece("wall_doorway.glb", self)
+	doorway.position = base
+	doorway.rotation.y = PI / 2.0  # açıklık doğuya (labirentin içine) bakar
+
+	for k in [1.0, 2.0]:
+		var tile := _spawn_piece("floor_tile_large.gltf.glb", self)
+		tile.position = base + Vector3(-CELL * k, 0, 0)
+
+	# karanlık çerçeve: koridorun yanları + tavanı (dış boşluk görünmesin)
+	var frame_mat := StandardMaterial3D.new()
+	frame_mat.albedo_color = Color(0.05, 0.045, 0.04)
+	for s: float in [-1.0, 1.0]:
+		var side := MeshInstance3D.new()
+		var sbox := BoxMesh.new()
+		sbox.size = Vector3(CELL * 2.4, WALL_H + 1.0, 1.0)
+		side.mesh = sbox
+		side.material_override = frame_mat
+		side.position = base + Vector3(-CELL * 1.2, WALL_H / 2.0 - 0.5, s * CELL * 0.55)
+		add_child(side)
+	var top := MeshInstance3D.new()
+	var tbox := BoxMesh.new()
+	tbox.size = Vector3(CELL * 2.4, 0.5, CELL * 1.3)
+	top.mesh = tbox
+	top.material_override = frame_mat
+	top.position = base + Vector3(-CELL * 1.2, WALL_H - 0.25, 0)
+	add_child(top)
+
+	# koridor sise/karanlığa kaybolur
+	_mist_plane(base + Vector3(-2.2, 1.8, 0), Vector2(4.4, 3.8), Color(0.45, 0.48, 0.55, 0.25), PI / 2.0)
+	_mist_plane(base + Vector3(-4.2, 1.8, 0), Vector2(4.4, 3.8), Color(0.40, 0.43, 0.50, 0.55), PI / 2.0)
+	_mist_plane(base + Vector3(-6.2, 1.8, 0), Vector2(4.6, 4.0), Color(0.35, 0.38, 0.45, 0.95), PI / 2.0)
+
+	# kapı ağzından içeri süzülen soluk ay ışığı hüzmesi
+	var beam := MeshInstance3D.new()
+	var bcyl := CylinderMesh.new()
+	bcyl.top_radius = 0.5
+	bcyl.bottom_radius = 1.3
+	bcyl.height = 5.0
+	var bmat := StandardMaterial3D.new()
+	bmat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	bmat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	bmat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	bmat.albedo_color = Color(0.85, 0.88, 1.0, 0.07)
+	beam.mesh = bcyl
+	beam.material_override = bmat
+	beam.position = base + Vector3(0.9, 2.0, 0)
+	beam.rotation.z = deg_to_rad(38.0)  # tepesi kapıya, eteği labirent zeminine
+	add_child(beam)
+	var blight := OmniLight3D.new()
+	blight.light_color = Color(0.8, 0.85, 1.0)
+	blight.light_energy = 1.1
+	blight.omni_range = 6.0
+	blight.position = base + Vector3(1.5, 1.8, 0)
+	add_child(blight)
+
+	# collision: koridor yanları + uç kapak + zemin
+	var body := StaticBody3D.new()
+	nav.add_child(body)
+	for s: float in [-1.0, 1.0]:
+		var scol := CollisionShape3D.new()
+		var scbox := BoxShape3D.new()
+		scbox.size = Vector3(CELL * 2.4, WALL_H, 1.0)
+		scol.shape = scbox
+		scol.position = base + Vector3(-CELL * 1.2, WALL_H / 2.0, s * CELL * 0.55)
+		body.add_child(scol)
+	var capc := CollisionShape3D.new()
+	var capb := BoxShape3D.new()
+	capb.size = Vector3(1.0, WALL_H, CELL * 1.3)
+	capc.shape = capb
+	capc.position = base + Vector3(-7.0, WALL_H / 2.0, 0)
+	body.add_child(capc)
+	var fcol := CollisionShape3D.new()
+	var fbox := BoxShape3D.new()
+	fbox.size = Vector3(CELL * 2.4, 1.0, CELL * 1.2)
+	fcol.shape = fbox
+	fcol.position = base + Vector3(-CELL * 1.2, -0.5, 0)
+	body.add_child(fcol)
+
+
 func _build_rooms() -> void:
 	for room: Dictionary in maze.rooms:
 		var rect: Rect2i = room.rect
 		var center := Vector3(
 				(rect.position.x + rect.size.x / 2.0) * CELL, 0,
 				(rect.position.y + rect.size.y / 2.0) * CELL)
+		if _biome == "garden":
+			# bahçe açıklığı: sandık köşesi / mini mezarlık / türbe
+			var roll := rng.randf()
+			if roll < 0.35:
+				var chest := StaticBody3D.new()
+				chest.set_script(CHEST_SCRIPT)
+				nav.add_child(chest)
+				chest.position = center
+				chest.rotation.y = (rng.randi() % 4) * PI / 2.0
+				for i in 2:
+					_spawn_prop(HW + ("gravestone.gltf" if i == 0 else "gravemarker_A.gltf"),
+							center + _scatter(rect), rng.randf_range(-0.4, 0.4))
+			elif roll < 0.7:
+				# mini mezarlık: mezar sırası + ölü ağaç + fener
+				for gx in 2:
+					for gz in 2:
+						_spawn_prop(HW + ("grave_A.gltf" if rng.randf() < 0.5 else "grave_B.gltf"),
+								center + Vector3(gx * 2.4 - 1.2, 0, gz * 2.0 - 1.0),
+								rng.randf_range(-0.15, 0.15))
+				_spawn_prop(HW + "tree_dead_medium.gltf", center + _scatter(rect), rng.randf() * TAU)
+				_spawn_prop(HW + "lantern_standing.gltf", center + _scatter(rect), 0.0)
+			else:
+				# türbe açıklığı: mum dolu sunak + bank + balkabakları
+				_spawn_prop(HW + "shrine_candles.gltf", center, (rng.randi() % 4) * PI / 2.0)
+				_spawn_prop(HW + "bench.gltf", center + _scatter(rect), rng.randf() * TAU)
+				for i in rng.randi_range(1, 3):
+					_spawn_prop(HW + "pumpkin_orange_small.gltf", center + _scatter(rect), rng.randf() * TAU)
+			continue
 		match room.type:
 			"depo":
 				for i in rng.randi_range(3, 5):
@@ -437,6 +1178,7 @@ func _build_props_and_chests() -> void:
 	# barreller koridorlara konmuyor — geçişi engelliyordu.
 	for cell: Vector2i in maze.dead_ends:
 		if rng.randf() < 0.5:
+			_chest_cells[cell] = true
 			var chest := StaticBody3D.new()
 			chest.set_script(CHEST_SCRIPT)
 			nav.add_child(chest)
@@ -450,7 +1192,15 @@ func _build_stage_ui() -> void:
 	add_child(layer)
 
 	_stage_label = Label.new()
-	_stage_label.text = "KAT %d" % Game.stage
+	match _biome:
+		"garden":
+			_stage_label.text = "BAHÇE %d/%d" % [Game.biome_stage(), Game.GARDEN_STAGES]
+		"garden_boss":
+			_stage_label.text = "BOSS — ŞATO BAHÇESİ"
+		"castle_boss":
+			_stage_label.text = "BOSS — TAHT SALONU"
+		_:
+			_stage_label.text = "KAT %d/%d" % [Game.biome_stage(), Game.CASTLE_STAGES]
 	_stage_label.add_theme_font_override("font", MenuUI.FONT)
 	_stage_label.add_theme_font_size_override("font_size", 26)
 	_stage_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
@@ -466,20 +1216,118 @@ func _build_stage_ui() -> void:
 	_fade.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	layer.add_child(_fade)
 
-	var intro := Label.new()
-	intro.text = "ŞATO — KAT %d" % Game.stage
-	intro.add_theme_font_override("font", MenuUI.FONT)
-	intro.add_theme_font_size_override("font_size", 64)
-	intro.add_theme_color_override("font_color", Color(0.85, 0.8, 0.6))
-	intro.set_anchors_preset(Control.PRESET_CENTER)
-	intro.position += Vector2(-220, -40)
-	layer.add_child(intro)
+	_stage_title = Label.new()
+	match _biome:
+		"garden":
+			_stage_title.text = "ŞATO BAHÇESİ — BÖLÜM %d" % Game.biome_stage()
+		"garden_boss":
+			_stage_title.text = "ŞATO BAHÇESİ — ARENA"
+		"castle_boss":
+			_stage_title.text = "ŞATO — TAHT SALONU"
+		_:
+			_stage_title.text = "ŞATO — KAT %d" % Game.biome_stage()
+	_stage_title.add_theme_font_override("font", MenuUI.FONT)
+	_stage_title.add_theme_font_size_override("font_size", 64)
+	_stage_title.add_theme_color_override("font_color", Color(0.85, 0.8, 0.6))
+	_stage_title.set_anchors_preset(Control.PRESET_CENTER)
+	_stage_title.position += Vector2(-220, -40)
+	layer.add_child(_stage_title)
 
+	# hikâye ekranı gösterilecekse kat geçiş animasyonu onun sonunda tetiklenir
+	if Game.stage == 1 and not Game.intro_shown:
+		_story_flag = "intro_shown"
+		_show_story_intro([
+			"GÜN BATARKEN LANETLİ ŞATONUN BAHÇESİNE VARDIN.",
+			"ÇİT LABİRENTİNİN DERİNLİKLERİNDE ÖLÜLER UYANIYOR.",
+			"ŞATOYA GİREBİLMEK İÇİN BAHÇENİN BEKÇİSİNİ GEÇMELİSİN.",
+		])
+	elif _biome == "castle" and Game.biome_stage() == 1 and not Game.castle_intro_shown:
+		_story_flag = "castle_intro_shown"
+		_show_story_intro([
+			"BAHÇENİN BEKÇİSİ DEVRİLDİ. DEMİR KAPI ARDINA KADAR AÇILDI.",
+			"ŞATONUN TAŞ KORİDORLARINDA ÖLÜM SESSİZCE DOLAŞIYOR.",
+			"LANETİN KAYNAĞI DERİNLERDE, TAHT SALONUNDA SENİ BEKLİYOR.",
+		])
+	else:
+		_play_stage_fade()
+
+
+func _play_stage_fade() -> void:
 	var tween := create_tween()
 	tween.tween_interval(0.9)
 	tween.set_parallel()
 	tween.tween_property(_fade, "color:a", 0.0, 0.8)
-	tween.tween_property(intro, "modulate:a", 0.0, 1.1)
+	tween.tween_property(_stage_title, "modulate:a", 0.0, 1.1)
+
+
+func _show_story_intro(lines: Array) -> void:
+	## bölüm girişlerinde oyuna ısındıran ekran: karanlık + hikâye satırları + [E]
+	_intro_active = true
+	player.process_mode = Node.PROCESS_MODE_DISABLED  # bakış/ateş/hareket kilitli
+
+	_story_layer = CanvasLayer.new()
+	_story_layer.layer = 12
+	add_child(_story_layer)
+
+	var black := ColorRect.new()
+	black.color = Color(0, 0, 0, 1)
+	black.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_story_layer.add_child(black)
+
+	var center := CenterContainer.new()
+	center.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_story_layer.add_child(center)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 34)
+	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	center.add_child(vbox)
+
+	var tween := create_tween()
+	_story_tween = tween
+	tween.tween_interval(0.7)
+	for text in lines:
+		var line := Label.new()
+		line.text = text
+		line.add_theme_font_override("font", MenuUI.FONT)
+		line.add_theme_font_size_override("font_size", 30)
+		line.add_theme_color_override("font_color", Color(0.85, 0.82, 0.72))
+		line.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+		line.modulate.a = 0.0
+		vbox.add_child(line)
+		tween.tween_property(line, "modulate:a", 1.0, 0.8)
+		tween.tween_interval(0.65)
+
+	var prompt := Label.new()
+	prompt.text = "[E]  DEVAM"
+	prompt.add_theme_font_override("font", MenuUI.FONT)
+	prompt.add_theme_font_size_override("font_size", 26)
+	prompt.add_theme_color_override("font_color", Color(0.5, 0.95, 0.4))
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prompt.modulate.a = 0.0
+	vbox.add_child(prompt)
+	tween.tween_property(prompt, "modulate:a", 1.0, 0.6)
+	tween.tween_callback(func() -> void:
+		if not is_instance_valid(prompt):
+			return
+		var pulse := prompt.create_tween().set_loops()
+		pulse.tween_property(prompt, "modulate:a", 0.45, 0.7)
+		pulse.tween_property(prompt, "modulate:a", 1.0, 0.7))
+
+
+func _dismiss_story_intro() -> void:
+	Game.set(_story_flag, true)
+	_intro_active = false
+	if _story_tween != null:
+		_story_tween.kill()
+	player.process_mode = Node.PROCESS_MODE_INHERIT
+	var tween := _story_layer.create_tween()
+	tween.tween_property(_story_layer.get_child(0), "modulate:a", 0.0, 0.6)
+	for child in _story_layer.get_children():
+		if child != _story_layer.get_child(0):
+			tween.parallel().tween_property(child, "modulate:a", 0.0, 0.4)
+	tween.tween_callback(_story_layer.queue_free)
+	_play_stage_fade()
 
 
 func _build_exit_screen_prompt(layer: CanvasLayer) -> void:
@@ -525,7 +1373,14 @@ func _build_exit_screen_prompt(layer: CanvasLayer) -> void:
 	badge.add_child(key)
 
 	var text := Label.new()
-	text.text = "SONRAKİ KATA GEÇ"
+	match _biome:
+		"garden_boss":
+			text.text = "ŞATOYA GİR"
+		"castle_boss":
+			text.text = "DERİNLERE İN"
+		_:
+			text.text = "SONRAKİ KATA GEÇ"
+	_exit_action_label = text
 	text.add_theme_font_override("font", MenuUI.FONT)
 	text.add_theme_font_size_override("font_size", 30)
 	text.add_theme_color_override("font_color", Color(0.92, 0.95, 0.9))
@@ -543,7 +1398,7 @@ func _build_exit_screen_prompt(layer: CanvasLayer) -> void:
 # ---------- akış ----------
 
 func _spawn_zombie() -> void:
-	if _stage_over or _alive >= 10 + 3 * Game.stage:
+	if _stage_over or _intro_active or _alive >= 10 + 3 * Game.stage:
 		return
 	# sadece oyuncuya yol bağlantısı olan (ulaşılabilir) hücrelerden doğur
 	var cell := Vector2i(rng.randi() % int(maze.w), rng.randi() % int(maze.h))
@@ -561,14 +1416,33 @@ func _spawn_zombie() -> void:
 	z.max_health = 40.0 * hp_scale
 	z.speed = 3.0 + 0.15 * (Game.stage - 1)
 	z.xp_value = 20 + 4 * (Game.stage - 1)
+	z.gold_value = 4 + rng.randi() % 4 + Game.stage
+	if _biome == "castle" and rng.randf() < 0.3:
+		# şato katlarında zombilerin arasına iskelet askerler karışır: hızlı ama kırılgan
+		z.model_path = SKELETON_MINION
+		z.base_scale = SKELETON_BASE_SCALE
+		z.model_scale = SKELETON_BASE_SCALE
+		z.max_health = 28.0 * hp_scale
+		z.speed = 3.9 + 0.15 * (Game.stage - 1)
 	add_child(z)
 	z.global_position = pos
 	_alive += 1
-	z.died.connect(func() -> void: _alive -= 1)
+	z.died.connect(_on_zombie_died)
+
+
+func _on_zombie_died() -> void:
+	_alive -= 1
+	_kills_done += 1
+	_update_exit_lock()
 
 
 func _process(_delta: float) -> void:
-	if _exit_near and not _stage_over and Input.is_action_just_pressed("interact"):
+	if _intro_active:
+		if Input.is_action_just_pressed("interact"):
+			_dismiss_story_intro()
+		return
+	if _exit_near and _exit_unlocked and not _stage_over \
+			and Input.is_action_just_pressed("interact"):
 		_finish_stage()
 
 
@@ -578,16 +1452,27 @@ func _on_exit_near(body: Node3D, near: bool) -> void:
 	_exit_near = near
 	if _stage_over:
 		return
-	_exit_screen_prompt.visible = near
-	_exit_prompt.modulate = Color(0.5, 0.95, 0.4) if near else Color(0.45, 0.85, 1.0)
+	_exit_screen_prompt.visible = near and _exit_unlocked
+	if _exit_unlocked:
+		_exit_prompt.modulate = Color(0.5, 0.95, 0.4) if near else Color(0.45, 0.85, 1.0)
 
 
 func _finish_stage() -> void:
 	_stage_over = true
 	_exit_screen_prompt.visible = false
 	Music.transition()  # E'ye basınca anında geçiş sesi
-	_exit_prompt.text = "KAT %d TAMAMLANDI!" % Game.stage
-	_stage_label.text = "KAT %d TAMAMLANDI!" % Game.stage
+	var done_text: String
+	match _biome:
+		"garden":
+			done_text = "BÖLÜM %d TAMAMLANDI!" % Game.biome_stage()
+		"garden_boss":
+			done_text = "ŞATOYA GİRİLİYOR..."
+		"castle_boss":
+			done_text = "DERİNLERE İNİLİYOR..."
+		_:
+			done_text = "KAT %d TAMAMLANDI!" % Game.biome_stage()
+	_exit_prompt.text = done_text
+	_stage_label.text = done_text
 	_stage_label.add_theme_color_override("font_color", Color(0.5, 0.95, 0.4))
 	_stage_label.scale = Vector2(1.5, 1.5)
 	var pop := _stage_label.create_tween()
@@ -610,6 +1495,431 @@ func _on_player_died() -> void:
 	get_tree().change_scene_to_file("res://scenes/ui/main_menu.tscn")
 
 
+# ---------- boss arenası (şato bahçesi) ----------
+
+func _build_boss_arena() -> void:
+	_setup_garden_environment(true)
+	var w := ARENA_CELLS * CELL  # arena kenarı (m)
+
+	var walls_body := StaticBody3D.new()
+	walls_body.name = "WallColliders"
+	nav.add_child(walls_body)
+
+	var floor_shape := CollisionShape3D.new()
+	var floor_box := BoxShape3D.new()
+	floor_box.size = Vector3(w + 8.0, 1.0, w + 8.0)
+	floor_shape.shape = floor_box
+	floor_shape.position = Vector3(w / 2.0, -0.5, w / 2.0)
+	walls_body.add_child(floor_shape)
+	_build_grass_floor(Vector2(w, w))
+
+	# çevre: kuzey kenarın ortası taş şato cephesi (ortada parmaklıklı kapı), kalanı çit.
+	# Güney kenarın ortası AÇIK: oyuncu çit koridorundan (labirentten) çıkıp arenaya girer.
+	var gate_i := ARENA_CELLS / 2  # taş kapı segmenti
+	for i in ARENA_CELLS:
+		var xc := (i + 0.5) * CELL
+		if i == gate_i:
+			var gate := _spawn_piece("wall_gated.gltf.glb", nav)
+			gate.position = Vector3(xc, 0, 0)
+		elif i == gate_i - 1 or i == gate_i + 1:
+			var stone := _spawn_piece("wall.gltf.glb", nav)
+			stone.position = Vector3(xc, 0, 0)
+		else:
+			_place_hedge(Vector3(xc, 0, 0), false, HEDGE_H + 0.6)
+		if i != gate_i:  # güneyde orta segment koridor ağzı olarak açık kalır
+			_place_hedge(Vector3(xc, 0, w), false, HEDGE_H + 0.6)
+		_place_hedge(Vector3(0, 0, xc), true, HEDGE_H + 0.6)
+		_place_hedge(Vector3(w, 0, xc), true, HEDGE_H + 0.6)
+	for px in [float(gate_i - 1) * CELL, float(gate_i + 2) * CELL]:
+		var pillar := _spawn_piece("pillar.gltf.glb", nav)
+		pillar.position = Vector3(px, 0, 0)
+
+	# çevre collision: kuzey + iki yan tam kutu, güney ortası boşluklu iki parça
+	for side in 3:
+		var col := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		var vertical := side >= 1
+		box.size = Vector3(1.0, WALL_H + 2.0, w + 2.0) if vertical else Vector3(w + 2.0, WALL_H + 2.0, 1.0)
+		col.shape = box
+		col.position = (Vector3(0.0 if side == 1 else w, WALL_H / 2.0, w / 2.0) if vertical
+				else Vector3(w / 2.0, WALL_H / 2.0, 0.0))
+		walls_body.add_child(col)
+	var gap_half := 2.0
+	for sgn: float in [-1.0, 1.0]:
+		var seg_len := w / 2.0 - gap_half + 1.0
+		var col := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(seg_len, WALL_H + 2.0, 1.0)
+		col.shape = box
+		var center_x := (w / 2.0 + sgn * gap_half) + sgn * seg_len / 2.0
+		col.position = Vector3(center_x, WALL_H / 2.0, w)
+		walls_body.add_child(col)
+
+	# güney çıkış koridoru: iki çit duvar + arka kapak — labirentten geliyormuş hissi
+	var cx0 := w / 2.0
+	for sgn: float in [-1.0, 1.0]:
+		_place_hedge(Vector3(cx0 + sgn * 2.35, 0, w + 2.8), true, HEDGE_H + 0.6, 7.0)
+		var ccol := CollisionShape3D.new()
+		var cbox := BoxShape3D.new()
+		cbox.size = Vector3(1.0, WALL_H, 7.2)
+		ccol.shape = cbox
+		ccol.position = Vector3(cx0 + sgn * 2.35, WALL_H / 2.0, w + 2.8)
+		walls_body.add_child(ccol)
+	# görünmez bariyer: oyuncu sise yürüyemez (görsel koridor ise sise devam eder)
+	var capcol := CollisionShape3D.new()
+	var capbox := BoxShape3D.new()
+	capbox.size = Vector3(5.9, WALL_H, 1.0)
+	capcol.shape = capbox
+	capcol.position = Vector3(cx0, WALL_H / 2.0, w + 6.0)
+	walls_body.add_child(capcol)
+	# arkaya dönünce boş duvar değil; sise kaybolan çit koridoru görünsün
+	for sgn: float in [-1.0, 1.0]:
+		_place_hedge(Vector3(cx0 + sgn * 2.35, 0, w + 9.7), true, HEDGE_H + 0.6, 7.0)
+	_place_hedge(Vector3(cx0, 0, w + 13.0), false, HEDGE_H + 0.6, 5.9)
+	_mist_plane(Vector3(cx0, 1.9, w + 5.4), Vector2(5.6, 4.2), Color(0.88, 0.79, 0.70, 0.30))
+	_mist_plane(Vector3(cx0, 1.9, w + 7.4), Vector2(5.6, 4.2), Color(0.89, 0.80, 0.72, 0.60))
+	_mist_plane(Vector3(cx0, 1.9, w + 9.6), Vector2(5.8, 4.4), Color(0.90, 0.82, 0.74, 0.95))
+	# koridor zemini (görsel sise kadar uzar; collision bariyere kadar yeter)
+	var cfloor := MeshInstance3D.new()
+	var cfbox := BoxMesh.new()
+	cfbox.size = Vector3(5.4, 0.1, 14.0)
+	cfbox.material = _grass_mat
+	cfloor.mesh = cfbox
+	cfloor.position = Vector3(cx0, -0.045, w + 6.3)
+	nav.add_child(cfloor)
+	var cfcol := CollisionShape3D.new()
+	var cfshape := BoxShape3D.new()
+	cfshape.size = Vector3(5.4, 1.0, 7.2)
+	cfcol.shape = cfshape
+	cfcol.position = Vector3(cx0, -0.5, w + 2.9)
+	walls_body.add_child(cfcol)
+
+	# içeride simetrik 4 çit küpü: siper
+	for off in [Vector3(w * 0.3, 0, w * 0.38), Vector3(w * 0.7, 0, w * 0.38),
+			Vector3(w * 0.3, 0, w * 0.72), Vector3(w * 0.7, 0, w * 0.72)]:
+		var cube := MeshInstance3D.new()
+		var cbox := BoxMesh.new()
+		cbox.size = Vector3(2.4, 1.7, 2.4)
+		if _hedge_mats.is_empty():
+			_place_hedge(Vector3(0, -50, 0), false)  # mat cache'i doldur (görünmez)
+		cbox.material = _hedge_mats[rng.randi() % _hedge_mats.size()]
+		cube.mesh = cbox
+		cube.position = off + Vector3(0, 0.85, 0)
+		nav.add_child(cube)
+		var ccol := CollisionShape3D.new()
+		var cshape := BoxShape3D.new()
+		cshape.size = cbox.size
+		ccol.shape = cshape
+		ccol.position = cube.position
+		walls_body.add_child(ccol)
+
+	_decorate_arena(w)
+	_flush_wall_tufts()
+
+	# oyuncu koridorun içinde doğar, çitlerin arasından arenaya yürüyerek çıkar
+	player.global_position = Vector3(w / 2.0, 0.2, w + 3.4)
+	player.rotation.y = 0.0  # kuzeye, şato kapısına bakar
+
+	_arena_size = Vector2(w, w)
+	_gate_pos = Vector3(w / 2.0, 0, 2.6)
+	_boss_name = "ÇÜRÜMÜŞ BAHÇIVAN"
+	_build_stage_ui()
+	_build_boss_bar()
+
+	nav.bake_navigation_mesh()
+	await nav.bake_finished
+	await get_tree().create_timer(1.6).timeout
+	if not _stage_over:
+		_spawn_boss(Vector3(w / 2.0, 0.1, 9.0), {
+			"hp": 1200.0, "speed": 2.3, "damage": 24.0, "range": 3.2,
+			"cooldown": 1.7, "xp": 350, "gold": 160, "scale": 1.5,
+		})
+
+
+func _build_boss_bar() -> void:
+	var layer := CanvasLayer.new()
+	layer.layer = 6
+	add_child(layer)
+
+	var holder := VBoxContainer.new()
+	holder.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	holder.offset_top = 70
+	holder.offset_left = -260
+	holder.offset_right = 260
+	layer.add_child(holder)
+
+	var name_label := Label.new()
+	name_label.text = _boss_name
+	name_label.add_theme_font_override("font", MenuUI.FONT)
+	name_label.add_theme_font_size_override("font_size", 24)
+	name_label.add_theme_color_override("font_color", Color(0.95, 0.4, 0.3))
+	name_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	holder.add_child(name_label)
+
+	_boss_bar = ProgressBar.new()
+	_boss_bar.custom_minimum_size = Vector2(520, 22)
+	_boss_bar.show_percentage = false
+	_boss_bar.max_value = 1.0
+	_boss_bar.value = 1.0
+	var bg := StyleBoxFlat.new()
+	bg.bg_color = Color(0.08, 0.06, 0.06, 0.85)
+	bg.set_corner_radius_all(4)
+	var fill := StyleBoxFlat.new()
+	fill.bg_color = Color(0.82, 0.18, 0.12)
+	fill.set_corner_radius_all(4)
+	_boss_bar.add_theme_stylebox_override("background", bg)
+	_boss_bar.add_theme_stylebox_override("fill", fill)
+	holder.add_child(_boss_bar)
+
+	holder.modulate.a = 0.0  # boss doğunca görünür
+
+
+func _spawn_boss(pos: Vector3, cfg: Dictionary) -> void:
+	_boss = zombie_scene.instantiate()
+	_boss.is_boss = true
+	_boss.model_path = cfg.get("model", "")
+	_boss.base_scale = cfg.get("base", 0.6)
+	_boss.model_scale = cfg.get("scale", 1.5)
+	_boss.max_health = cfg.get("hp", 1200.0)
+	_boss.speed = cfg.get("speed", 2.3)
+	_boss.attack_damage = cfg.get("damage", 24.0)
+	_boss.attack_range = cfg.get("range", 3.2)
+	_boss.attack_cooldown = cfg.get("cooldown", 1.7)
+	_boss.xp_value = cfg.get("xp", 350)
+	_boss.gold_value = cfg.get("gold", 160)
+	add_child(_boss)
+	_boss.global_position = pos
+	_boss.health_changed.connect(_on_boss_health)
+	_boss.died.connect(_on_boss_died)
+
+	var bar_holder := _boss_bar.get_parent() as Control
+	var show_bar := bar_holder.create_tween()
+	show_bar.tween_property(bar_holder, "modulate:a", 1.0, 0.8)
+
+	# faz 2 destek çağrısı zamanlayıcısı (faz 2'de aktifleşir)
+	var summon := Timer.new()
+	summon.name = "SummonTimer"
+	summon.wait_time = 8.0
+	summon.timeout.connect(_summon_minions)
+	add_child(summon)
+
+
+func _on_boss_health(health: float, max_health: float) -> void:
+	if _boss_bar != null:
+		_boss_bar.value = health / max_health
+	if not _boss_phase2 and health <= max_health * 0.5 and health > 0.0:
+		# FAZ 2: öfke — hızlanır ve destek çağırır
+		_boss_phase2 = true
+		_boss.speed *= 1.45
+		($SummonTimer as Timer).start()
+		_summon_minions()
+		_stage_label.text = "%s ÖFKELENDİ!" % _boss_name
+		_stage_label.add_theme_color_override("font_color", Color(1.0, 0.4, 0.3))
+
+
+func _summon_minions() -> void:
+	if _stage_over or _boss == null or _alive >= 5:
+		return
+	var w := _arena_size.x
+	var d := _arena_size.y
+	var corners := [Vector3(3, 0.1, 3), Vector3(w - 3, 0.1, 3),
+			Vector3(3, 0.1, d - 3), Vector3(w - 3, 0.1, d - 3)]
+	for i in 2:
+		var z := zombie_scene.instantiate()
+		if _biome == "castle_boss":
+			# taht salonunda lord, iskelet askerlerini diriltir
+			z.model_path = SKELETON_MINION
+			z.base_scale = SKELETON_BASE_SCALE
+			z.model_scale = SKELETON_BASE_SCALE
+			z.max_health = 75.0
+			z.speed = 4.0
+			z.xp_value = 30
+			z.gold_value = 10
+		else:
+			z.max_health = 60.0
+			z.speed = 3.6
+			z.xp_value = 25
+			z.gold_value = 8
+		add_child(z)
+		z.global_position = corners[rng.randi() % corners.size()]
+		_alive += 1
+		z.died.connect(_on_zombie_died)
+
+
+func _on_boss_died() -> void:
+	if has_node("SummonTimer"):
+		($SummonTimer as Timer).stop()
+	var bar_holder := _boss_bar.get_parent() as Control
+	var hide_bar := bar_holder.create_tween()
+	hide_bar.tween_property(bar_holder, "modulate:a", 0.0, 1.0)
+
+	_stage_label.text = "%s YENİLDİ!" % _boss_name
+	_stage_label.add_theme_color_override("font_color", Color(0.5, 0.95, 0.4))
+	_stage_label.scale = Vector2(1.5, 1.5)
+	var pop := _stage_label.create_tween()
+	pop.tween_property(_stage_label, "scale", Vector2.ONE, 0.4)
+
+	# boss ganimeti: BEDAVA yüksek rarity sandık + kapının önünde portal
+	var chest := StaticBody3D.new()
+	chest.set_script(CHEST_SCRIPT)
+	chest.set("free_chest", true)
+	chest.set("rarity_boost", 3 if _biome == "castle_boss" else 2)
+	nav.add_child(chest)
+	chest.position = _gate_pos + Vector3(-4.0, 0, 2.4)
+	chest.rotation.y = PI * 0.15
+
+	_spawn_portal(_gate_pos)
+	_exit_unlocked = true
+	_exit_prompt.text = "DERİNLERE İNİŞ" if _biome == "castle_boss" else "ŞATO KAPISI"
+
+
+# ---------- şato taht salonu (kat 12 boss'u) ----------
+
+func _build_castle_hall() -> void:
+	var hw := 9
+	var hd := 6
+	var w := hw * CELL
+	var d := hd * CELL
+	maze = {"w": hw, "h": hd}  # _build_ceiling boyutları buradan okur
+
+	var walls_body := StaticBody3D.new()
+	walls_body.name = "WallColliders"
+	nav.add_child(walls_body)
+
+	var floor_shape := CollisionShape3D.new()
+	var floor_box := BoxShape3D.new()
+	floor_box.size = Vector3(w + 8.0, 1.0, d + 8.0)
+	floor_shape.shape = floor_box
+	floor_shape.position = Vector3(w / 2.0, -0.5, d / 2.0)
+	walls_body.add_child(floor_shape)
+
+	for x in hw:
+		for y in hd:
+			var tile := _spawn_piece(_pick_weighted(FLOOR_PIECES), nav)
+			tile.position = _cell_center(Vector2i(x, y))
+
+	# çevre duvarları (taş; meşaleler _place_wall içinden gelir) + köşe sütunları
+	for i in hw:
+		_place_wall(walls_body, Vector3((i + 0.5) * CELL, 0, 0), false)
+		_place_wall(walls_body, Vector3((i + 0.5) * CELL, 0, d), false)
+	for j in hd:
+		_place_wall(walls_body, Vector3(0, 0, (j + 0.5) * CELL), true)
+		_place_wall(walls_body, Vector3(w, 0, (j + 0.5) * CELL), true)
+	for cx in [0.0, w]:
+		for cz in [0.0, d]:
+			var corner := _spawn_piece("pillar.gltf.glb", nav)
+			corner.position = Vector3(cx, 0, cz)
+
+	_build_ceiling()
+
+	# iç sütun sıraları: salona ritim + siper
+	for px in [w / 3.0, 2.0 * w / 3.0]:
+		for pz in [d / 3.0, 2.0 * d / 3.0]:
+			var pillar := _spawn_piece("pillar.gltf.glb", nav)
+			pillar.position = Vector3(px, 0, pz)
+			var col := CollisionShape3D.new()
+			var box := BoxShape3D.new()
+			box.size = Vector3(1.2, WALL_H, 1.2)
+			col.shape = box
+			col.position = Vector3(px, WALL_H / 2.0, pz)
+			walls_body.add_child(col)
+
+	# taht ucu (kuzey): kızıl sancaklar + örtülü masa + mumlar + kafatası mumları
+	var cxm := w / 2.0
+	for bx in [-4.0, 0.0, 4.0]:
+		var banner := _spawn_piece("banner_patternA_red.gltf.glb", nav)
+		banner.position = Vector3(cxm + bx, 2.6, 0.6)
+	_spawn_prop("table_long_tablecloth.gltf.glb", Vector3(cxm, 0, 2.8), 0.0)
+	var candle := _spawn_piece("candle_triple.gltf.glb", nav)
+	candle.position = Vector3(cxm, 1.0, 2.8)
+	for sx in [-2.2, 2.2]:
+		var skull := _spawn_piece(HW + "skull_candle.gltf", nav)
+		skull.position = Vector3(cxm + sx, 1.02, 2.8)
+	var glow := OmniLight3D.new()
+	glow.light_color = Color(1.0, 0.66, 0.32)
+	glow.light_energy = 2.2
+	glow.omni_range = 10.0
+	glow.position = Vector3(cxm, 2.6, 3.2)
+	add_child(glow)
+
+	# girişten tahta uzanan kızıl halı
+	var carpet := MeshInstance3D.new()
+	var cbox := BoxMesh.new()
+	cbox.size = Vector3(3.2, 0.04, d - 7.0)
+	var cmat := StandardMaterial3D.new()
+	cmat.albedo_color = Color(0.42, 0.07, 0.07)
+	cmat.roughness = 1.0
+	cbox.material = cmat
+	carpet.mesh = cbox
+	carpet.position = Vector3(cxm, 0.02, d / 2.0 + 1.6)
+	add_child(carpet)
+
+	# yan duvarlara dönüşümlü sancak + kalkan sancağı
+	var bi := 0
+	for j in range(1, hd):
+		var bz := j * CELL
+		var piece := "banner_patternB_red.gltf.glb" if bi % 2 == 0 else "banner_shield_red.gltf.glb"
+		var left := _spawn_piece(piece, nav)
+		left.position = Vector3(0.6, 2.6, bz)
+		left.rotation.y = PI / 2.0
+		var right := _spawn_piece(piece, nav)
+		right.position = Vector3(w - 0.6, 2.6, bz)
+		right.rotation.y = -PI / 2.0
+		bi += 1
+
+	# ziyafet masaları (devrik sandalyeli) — sütun sıralarının iç hattında
+	for tx in [cxm - 7.5, cxm + 7.5]:
+		_spawn_prop("table_long_decorated_A.gltf.glb", Vector3(tx, 0, d * 0.45), PI / 2.0)
+		_spawn_prop("table_long_tablecloth_decorated_A.gltf.glb", Vector3(tx, 0, d * 0.68), PI / 2.0)
+		var tcandle := _spawn_piece("candle_lit.gltf.glb", nav)
+		tcandle.position = Vector3(tx, 1.0, d * 0.45)
+		var tskull := _spawn_piece(HW + "skull.gltf", nav)
+		tskull.position = Vector3(tx, 1.0, d * 0.68)
+		for i in 2:
+			_spawn_prop("chair.gltf.glb", Vector3(tx + rng.randf_range(-1.2, 1.2), 0,
+					d * rng.randf_range(0.5, 0.62)), rng.randf() * TAU)
+
+	# güney duvar dipleri: raflar + fıçı/kasa yığınları
+	_spawn_prop("shelf_large.gltf.glb", Vector3(5.0, 0, d - 1.0), PI)
+	_spawn_prop("shelf_small_candles.gltf.glb", Vector3(w - 5.0, 0, d - 1.0), PI)
+	_spawn_prop("barrel_small_stack.gltf.glb", Vector3(2.5, 0, d - 2.5), rng.randf() * TAU)
+	_spawn_prop("crates_stacked.gltf.glb", Vector3(w - 2.5, 0, d - 2.5), rng.randf() * TAU)
+
+	# sütun diplerine mumlar
+	for px in [w / 3.0, 2.0 * w / 3.0]:
+		var pcandle := _spawn_piece("candle_triple.gltf.glb", nav)
+		pcandle.position = Vector3(px + 0.9, 0, d / 3.0 + 0.9)
+
+	# duvar diplerine tabutlar + yerlere kemik kırıntıları
+	for sx in [-8.0, 8.0]:
+		_spawn_prop(HW + "coffin.gltf", Vector3(cxm + sx, 0, 2.4), 0.0)
+	_spawn_prop(HW + "coffin_decorated.gltf", Vector3(2.2, 0, d * 0.5), PI / 2.0)
+	_spawn_prop(HW + "coffin.gltf", Vector3(w - 2.2, 0, d * 0.58), PI / 2.0)
+	for i in 10:
+		var bone := _spawn_piece(HW + ["bone_A.gltf", "bone_B.gltf", "skull.gltf", "ribcage.gltf"][rng.randi() % 4], self)
+		bone.position = Vector3(rng.randf_range(4.0, w - 4.0), 0, rng.randf_range(7.0, d - 5.0))
+		bone.rotation.y = rng.randf() * TAU
+
+	player.global_position = Vector3(cxm, 0.2, d - 3.0)
+	player.rotation.y = 0.0  # tahta doğru bakar
+
+	_arena_size = Vector2(w, d)
+	_gate_pos = Vector3(cxm, 0, 5.6)
+	_boss_name = "İSKELET LORDU"
+	_build_stage_ui()
+	_build_boss_bar()
+
+	nav.bake_navigation_mesh()
+	await nav.bake_finished
+	await get_tree().create_timer(1.6).timeout
+	if not _stage_over:
+		_spawn_boss(Vector3(cxm, 0.1, 8.0), {
+			"model": SKELETON_WARRIOR, "base": SKELETON_BASE_SCALE, "scale": 1.8,
+			"hp": 2400.0, "speed": 2.6, "damage": 30.0, "range": 3.4,
+			"cooldown": 1.5, "xp": 600, "gold": 320,
+		})
+
+
 # ---------- yardımcılar ----------
 
 func _cell_center(c: Vector2i) -> Vector3:
@@ -618,7 +1928,9 @@ func _cell_center(c: Vector2i) -> Vector3:
 
 func _spawn_piece(piece_file: String, parent: Node) -> Node3D:
 	if not _piece_cache.has(piece_file):
-		_piece_cache[piece_file] = load(KAYKIT + piece_file)
+		# tam yol verilmişse (örn. Halloween paketi) olduğu gibi, yoksa KayKit zindan klasöründen
+		var full := piece_file if piece_file.begins_with("res://") else KAYKIT + piece_file
+		_piece_cache[piece_file] = load(full)
 	var node: Node3D = (_piece_cache[piece_file] as PackedScene).instantiate()
 	parent.add_child(node)
 	return node

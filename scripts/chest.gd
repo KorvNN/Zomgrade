@@ -1,23 +1,33 @@
 extends StaticBody3D
-## Altınla açılan loot sandığı. Yaklaş + E → altın yeterse açılır.
-
+## Loot sandığı. Görsel durum dili:
+##  - boss sandığı (free_chest): ALTIN model + ışık huzmesi + nabız — yazısız fark edilir
+##  - alınabilir (altın yetiyor): sıcak altın parıltı
+##  - alınamaz (altın yetmiyor): sönük kırmızı kor
+##  - açılmış: kararmış model, ışık yok
 const CHEST_MODEL := "res://addons/kaykit_dungeon_remastered/assets/gltf/chest.glb"
 const GOLD_MODEL := "res://addons/kaykit_dungeon_remastered/assets/gltf/chest_gold.glb"
 const OPEN_SND := preload("res://assets/audio/sfx/chest_open.wav")
 
 var cost := 30
+var free_chest := false  ## boss ganimeti: bedava + garantili yüksek rarity kart
+var rarity_boost := 0
 var opened := false
 var _player_near := false
 var _player: Node3D
 var _prompt: Label3D
 var _model: Node3D
+var _glow: OmniLight3D
+var _pulse: Tween
+var _beam: MeshInstance3D
 
 
 func _ready() -> void:
-	cost = 25 + 10 * (Game.stage - 1)
+	cost = 0 if free_chest else 25 + 10 * (Game.stage - 1)
 
-	_model = (load(CHEST_MODEL) as PackedScene).instantiate()
+	_model = (load(GOLD_MODEL if free_chest else CHEST_MODEL) as PackedScene).instantiate()
 	add_child(_model)
+	if free_chest:
+		_model.scale = Vector3.ONE * 1.5
 
 	var col := CollisionShape3D.new()
 	var box := BoxShape3D.new()
@@ -38,15 +48,72 @@ func _ready() -> void:
 	add_child(area)
 
 	_prompt = Label3D.new()
-	_prompt.text = "[E] AÇ — %d ALTIN" % cost
 	_prompt.font_size = 64
 	_prompt.pixel_size = 0.004
 	_prompt.billboard = BaseMaterial3D.BILLBOARD_ENABLED
-	_prompt.modulate = Color(0.95, 0.8, 0.3)
 	_prompt.outline_size = 12
 	_prompt.position.y = 1.9
 	_prompt.visible = false
 	add_child(_prompt)
+
+	_glow = OmniLight3D.new()
+	_glow.position.y = 1.0
+	add_child(_glow)
+
+	if free_chest:
+		_build_beam()
+
+	Game.gold_changed.connect(func(_g: int) -> void: _update_visuals())
+	_update_visuals()
+
+
+func _build_beam() -> void:
+	## boss sandığı: gökyüzüne uzanan altın ışık huzmesi
+	var mat := StandardMaterial3D.new()
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	mat.albedo_color = Color(1.0, 0.85, 0.4, 0.16)
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.55
+	cyl.bottom_radius = 0.85
+	cyl.height = 7.0
+	_beam = MeshInstance3D.new()
+	_beam.mesh = cyl
+	_beam.material_override = mat
+	_beam.position.y = 3.5
+	add_child(_beam)
+
+
+func _update_visuals() -> void:
+	if _pulse != null:
+		_pulse.kill()
+		_pulse = null
+
+	if opened:
+		_glow.light_energy = 0.0
+		return
+
+	if free_chest:
+		_glow.light_color = Color(1.0, 0.82, 0.35)
+		_glow.omni_range = 7.0
+		_glow.light_energy = 2.4
+		_pulse = _glow.create_tween().set_loops()
+		_pulse.tween_property(_glow, "light_energy", 3.4, 0.9)
+		_pulse.tween_property(_glow, "light_energy", 2.0, 0.9)
+	elif Game.gold >= cost:
+		# alınabilir: sıcak altın parıltı
+		_glow.light_color = Color(1.0, 0.85, 0.4)
+		_glow.omni_range = 4.5
+		_glow.light_energy = 1.2
+	else:
+		# para yetmiyor: sönük kırmızı kor
+		_glow.light_color = Color(0.8, 0.22, 0.16)
+		_glow.omni_range = 3.0
+		_glow.light_energy = 0.55
+
+	if _player_near:
+		_refresh_prompt()
 
 
 func _process(_delta: float) -> void:
@@ -69,7 +136,10 @@ func _on_exit(body: Node3D) -> void:
 
 
 func _refresh_prompt() -> void:
-	if Game.gold >= cost:
+	if free_chest:
+		_prompt.text = "[E] AÇ"
+		_prompt.modulate = Color(0.97, 0.72, 0.2)
+	elif Game.gold >= cost:
 		_prompt.text = "[E] AÇ — %d ALTIN" % cost
 		_prompt.modulate = Color(0.5, 0.95, 0.4)
 	else:
@@ -79,7 +149,7 @@ func _refresh_prompt() -> void:
 
 func _try_open() -> void:
 	_refresh_prompt()
-	if not Game.spend_gold(cost):
+	if not free_chest and not Game.spend_gold(cost):
 		return
 	opened = true
 
@@ -92,29 +162,49 @@ func _try_open() -> void:
 	snd.play()
 	snd.finished.connect(snd.queue_free)
 
-	# altın sandığa dönüş + parlama
-	_model.queue_free()
-	_model = (load(GOLD_MODEL) as PackedScene).instantiate()
-	add_child(_model)
-	var light := OmniLight3D.new()
-	light.light_color = Color(1.0, 0.85, 0.4)
-	light.light_energy = 3.0
-	light.omni_range = 5.0
-	light.position.y = 1.0
-	add_child(light)
-	var tween := create_tween()
-	tween.tween_property(light, "light_energy", 0.6, 1.2)
+	# açılış parlaması → sonra sön; sandık kararıp "boş" görünür
+	if _pulse != null:
+		_pulse.kill()
+		_pulse = null
+	_glow.light_color = Color(1.0, 0.85, 0.4)
+	_glow.light_energy = 3.5
+	var fade := _glow.create_tween()
+	fade.tween_property(_glow, "light_energy", 0.0, 1.6)
+	if _beam != null:
+		var beam_fade := _beam.create_tween()
+		beam_fade.tween_property(_beam, "scale", Vector3(0.01, 1.0, 0.01), 1.2)
+		beam_fade.tween_callback(_beam.queue_free)
+	_darken_model()
 
 	_give_loot()
 
 
+func _darken_model() -> void:
+	## açılmış sandık: koyu gri tonlama — uzaktan "bitti" okunur
+	for mesh: MeshInstance3D in _model.find_children("*", "MeshInstance3D", true, false):
+		var count := mesh.get_surface_override_material_count()
+		for i in count:
+			var base := mesh.mesh.surface_get_material(i)
+			if base is StandardMaterial3D:
+				var m: StandardMaterial3D = base.duplicate()
+				m.albedo_color = m.albedo_color * Color(0.35, 0.33, 0.32)
+				mesh.set_surface_override_material(i, m)
+
+
 func _give_loot() -> void:
+	if free_chest:
+		# boss ganimeti: garantili yüksek rarity kart çekimi
+		await get_tree().create_timer(0.5).timeout
+		Game.bonus_draw.emit(rarity_boost)
+		_prompt.visible = false
+		return
+
 	var roll := randf()
 	if roll < 0.40:
 		_prompt.text = "BONUS KART!"
 		_prompt.modulate = Color(0.7, 0.5, 1.0)
 		await get_tree().create_timer(0.6).timeout
-		Game.bonus_draw.emit()
+		Game.bonus_draw.emit(0)
 	elif roll < 0.70:
 		_prompt.text = "+50 CAN"
 		_prompt.modulate = Color(0.4, 0.95, 0.4)
